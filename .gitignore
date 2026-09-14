@@ -1,0 +1,66 @@
+# Android Studio and IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# Gradle
+.gradle/
+build/
+**/build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Android local configuration
+local.properties
+.externalNativeBuild/
+.cxx/
+captures/
+
+# Signing material
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+
+# Native and packaged artifacts
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.so
+
+# Sensitive project data
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+diagnostics/
+private-samples/
+real-samples/
+statements/
+
+# Payment statements and common exports
+*账单*.csv
+*账单*.xlsx
+*账单*.zip
+*bill*.csv
+*bill*.xlsx
+*statement*.csv
+*statement*.xlsx
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key

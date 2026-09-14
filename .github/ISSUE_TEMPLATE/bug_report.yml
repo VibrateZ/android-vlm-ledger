@@ -1,0 +1,66 @@
+name: Bug report
+description: 报告功能异常、兼容性问题或识别错误
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 隐私提醒
+        GitHub Issue 默认公开。请勿上传含真实姓名、头像、商户、金额、订单号、二维码、账单或其他个人信息的截图和文件。
+        优先附加应用主动导出的脱敏诊断信息；必须使用图片时，请使用合成内容或彻底脱敏的样本。
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: 隐私确认
+      options:
+        - label: 我已确认本 Issue 及附件不包含未经脱敏的个人或财务信息。
+          required: true
+  - type: input
+    id: device
+    attributes:
+      label: 设备型号
+      placeholder: 例如 Xiaomi 15
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Android 与 HyperOS 版本
+      placeholder: 例如 Android 16 / HyperOS 3.x
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: 相关应用版本
+      description: 请填写本应用以及微信或支付宝版本。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 请提供最短、可重复的操作步骤。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 脱敏诊断信息
+      description: 粘贴或拖入应用主动导出的脱敏诊断内容。提交前请再次检查。
+    validations:
+      required: false
