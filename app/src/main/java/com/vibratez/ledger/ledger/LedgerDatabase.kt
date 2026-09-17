@@ -54,6 +54,37 @@ data class TransactionEntity(
     val createdAtMillis: Long,
 )
 
+@Entity(
+    tableName = "pending_reviews",
+    indices = [Index(value = ["sha256"], unique = true)],
+)
+data class PendingReviewEntity(
+    @PrimaryKey val id: String,
+    val sha256: String,
+    val sourceUri: String,
+    val direction: String,
+    val amountMinor: Long?,
+    val currency: String?,
+    val merchant: String?,
+    val counterparty: String?,
+    val occurredAt: String?,
+    val platform: String,
+    val timeSource: String?,
+    val externalId: String?,
+    val suggestedTag: String?,
+    val confidence: Double,
+    val isPaymentScreenshot: Boolean,
+    val positiveFeatures: String,
+    val negativeFeatures: String,
+    val freshness: String,
+    val reasonCode: String,
+    val vlmModel: String?,
+    val vlmRequestId: String?,
+    val screenshotCapturedAtMillis: Long?,
+    val status: String,
+    val createdAtMillis: Long,
+)
+
 @Dao
 interface TransactionDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
@@ -66,13 +97,32 @@ interface TransactionDao {
     suspend fun containsHash(sha256: String): Boolean
 }
 
+@Dao
+interface PendingReviewDao {
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insert(entity: PendingReviewEntity): Long
+
+    @Query("SELECT * FROM pending_reviews WHERE status = 'PENDING_CONFIRMATION' ORDER BY createdAtMillis DESC")
+    suspend fun pending(): List<PendingReviewEntity>
+
+    @Query("SELECT EXISTS(SELECT 1 FROM pending_reviews WHERE sha256 = :sha256 AND status = 'PENDING_CONFIRMATION')")
+    suspend fun containsPending(sha256: String): Boolean
+
+    @Query("SELECT EXISTS(SELECT 1 FROM pending_reviews WHERE sourceUri = :sourceUri)")
+    suspend fun containsSourceUri(sourceUri: String): Boolean
+
+    @Query("UPDATE pending_reviews SET status = :status WHERE id = :id")
+    suspend fun updateStatus(id: String, status: String): Int
+}
+
 @Database(
-    entities = [TransactionEntity::class],
-    version = 3,
+    entities = [TransactionEntity::class, PendingReviewEntity::class],
+    version = 4,
     exportSchema = false,
 )
 abstract class LedgerDatabase : RoomDatabase() {
     abstract fun transactionDao(): TransactionDao
+    abstract fun pendingReviewDao(): PendingReviewDao
 
     companion object {
         fun open(context: Context, settings: SecureSettings): LedgerDatabase {
@@ -87,7 +137,7 @@ abstract class LedgerDatabase : RoomDatabase() {
                 "ledger.db",
             )
                 .openHelperFactory(factory)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .build()
         }
 
@@ -112,6 +162,40 @@ abstract class LedgerDatabase : RoomDatabase() {
                         "index_transactions_transactionFingerprint " +
                         "ON transactions(transactionFingerprint)",
                 )
+            }
+        }
+
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS pending_reviews (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        sha256 TEXT NOT NULL,
+                        sourceUri TEXT NOT NULL,
+                        direction TEXT NOT NULL,
+                        amountMinor INTEGER,
+                        currency TEXT,
+                        merchant TEXT,
+                        counterparty TEXT,
+                        occurredAt TEXT,
+                        platform TEXT NOT NULL,
+                        timeSource TEXT,
+                        externalId TEXT,
+                        suggestedTag TEXT,
+                        confidence REAL NOT NULL,
+                        isPaymentScreenshot INTEGER NOT NULL,
+                        positiveFeatures TEXT NOT NULL,
+                        negativeFeatures TEXT NOT NULL,
+                        freshness TEXT NOT NULL,
+                        reasonCode TEXT NOT NULL,
+                        vlmModel TEXT,
+                        vlmRequestId TEXT,
+                        screenshotCapturedAtMillis INTEGER,
+                        status TEXT NOT NULL,
+                        createdAtMillis INTEGER NOT NULL
+                    )
+                """.trimIndent())
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_pending_reviews_sha256 ON pending_reviews(sha256)")
             }
         }
     }

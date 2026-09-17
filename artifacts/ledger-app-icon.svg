@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">云端智能记账应用图标</title>
+  <desc id="desc">深绿色背景上的白色票据，四角扫描取景框环绕，票据内有账目行与金色金额标记。</desc>
+
+  <!-- Full-bleed adaptive icon background. -->
+  <rect width="1024" height="1024" fill="#173D35"/>
+
+  <!-- Scanner corners, kept inside the adaptive-icon safe zone. -->
+  <path d="M248 386V282c0-19 15-34 34-34h104"
+        fill="none" stroke="#74D8BA" stroke-width="42"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M638 248h104c19 0 34 15 34 34v104"
+        fill="none" stroke="#74D8BA" stroke-width="42"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M776 638v104c0 19-15 34-34 34H638"
+        fill="none" stroke="#74D8BA" stroke-width="42"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M386 776H282c-19 0-34-15-34-34V638"
+        fill="none" stroke="#74D8BA" stroke-width="42"
+        stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Receipt / ledger sheet. -->
+  <path d="M350 320c0-24 19-43 43-43h238c24 0 43 19 43 43v380
+           l-41-24-40 24-41-24-40 24-41-24-40 24-41-24-40 24z"
+        fill="#F8FAF8"/>
+
+  <!-- Ledger entries. -->
+  <circle cx="416" cy="405" r="22" fill="#F2B84B"/>
+  <rect x="463" y="390" width="143" height="30" rx="15" fill="#28584C"/>
+
+  <circle cx="416" cy="495" r="15" fill="#8AA49C"/>
+  <rect x="463" y="480" width="106" height="30" rx="15" fill="#5E7B73"/>
+
+  <circle cx="416" cy="585" r="15" fill="#8AA49C"/>
+  <rect x="463" y="570" width="126" height="30" rx="15" fill="#5E7B73"/>
+
+  <!-- Scan confirmation mark. -->
+  <circle cx="620" cy="636" r="48" fill="#F2B84B"/>
+  <path d="M596 636l16 16 32-37"
+        fill="none" stroke="#173D35" stroke-width="17"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
