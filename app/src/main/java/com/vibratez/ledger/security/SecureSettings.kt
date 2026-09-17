@@ -14,6 +14,7 @@ import javax.crypto.spec.GCMParameterSpec
 
 data class AppSettings(
     val cloudEnabled: Boolean = false,
+    val backgroundAutoProcessingEnabled: Boolean = false,
     val baseUrl: String = "",
     val model: String = "",
     val timeoutSeconds: Int = 60,
@@ -28,6 +29,7 @@ class SecureSettings(context: Context) {
 
     fun load(): AppSettings = AppSettings(
         cloudEnabled = preferences.getBoolean(KEY_CLOUD_ENABLED, false),
+        backgroundAutoProcessingEnabled = preferences.getBoolean(KEY_BACKGROUND_AUTO_PROCESSING, false),
         baseUrl = preferences.getString(KEY_BASE_URL, "").orEmpty(),
         model = preferences.getString(KEY_MODEL, "").orEmpty(),
         timeoutSeconds = preferences.getInt(KEY_TIMEOUT_SECONDS, 60).coerceIn(10, 120),
@@ -39,6 +41,7 @@ class SecureSettings(context: Context) {
         val encrypted = apiKey?.takeUnless(String::isBlank)?.let(::encrypt)
         preferences.edit {
             putBoolean(KEY_CLOUD_ENABLED, settings.cloudEnabled)
+            putBoolean(KEY_BACKGROUND_AUTO_PROCESSING, settings.backgroundAutoProcessingEnabled)
             putString(KEY_BASE_URL, settings.baseUrl.trim().trimEnd('/'))
             putString(KEY_MODEL, settings.model.trim())
             putInt(KEY_TIMEOUT_SECONDS, settings.timeoutSeconds)
@@ -146,6 +149,7 @@ class SecureSettings(context: Context) {
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val KEY_CLOUD_ENABLED = "cloud_enabled"
+        const val KEY_BACKGROUND_AUTO_PROCESSING = "background_auto_processing"
         const val KEY_BASE_URL = "base_url"
         const val KEY_MODEL = "model"
         const val KEY_TIMEOUT_SECONDS = "timeout_seconds"

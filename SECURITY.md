@@ -4,7 +4,7 @@
 
 请优先使用 GitHub 的私密安全报告功能，不要在公开 Issue 中披露漏洞细节、真实支付截图、账单、日志或个人信息：
 
-https://github.com/VibrateZ/hyperos-offline-ledger/security/advisories/new
+https://github.com/VibrateZ/android-vlm-ledger/security/advisories/new
 
 报告中请说明受影响版本、复现条件、潜在影响和可行的缓解方式。提交任何附件前，请移除姓名、头像、二维码、订单号、金额、商户及设备标识等敏感内容。
 
@@ -29,6 +29,7 @@ https://github.com/VibrateZ/hyperos-offline-ledger/security/advisories/new
 ## Android 权限与删除
 
 - Android 13+（API 33+）按需申请 `READ_MEDIA_IMAGES`；Android 12 及以下（API 26-32）申请 `READ_EXTERNAL_STORAGE`。Android 14+（API 34+）还需识别 `READ_MEDIA_VISUAL_USER_SELECTED` 的部分照片授权。只在用户启用截图识别时请求，并说明该权限技术上可读取的范围。
+- 后台自动处理独立且默认关闭；只有云端识别、完整照片权限和有效 VLM 配置同时成立时才安排带联网约束的 WorkManager。Android 13+ 通知权限被拒绝时仍保存待确认结果，但无法主动通知用户。
 - 用户拒绝、在 Android 14+ 只授予部分照片或撤销权限时，自动发现应关闭并提供手动分享/选择文件或手工记账等降级路径；不得借助 Root、无障碍、UsageStats、录屏或其他高权限绕过系统限制。
 - 删除系统截图按 API 级别处理：API 30+ 使用 `MediaStore.createDeleteRequest()` 显示系统确认；API 29 捕获 `RecoverableSecurityException` 并启动其用户确认；API 26-28 仅在用户点击删除且授予 `WRITE_EXTERNAL_STORAGE` 后执行。应用不得静默删除非自身创建的图片，取消、拒绝或失败时默认保留原图。
 

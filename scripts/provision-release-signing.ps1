@@ -1,6 +1,6 @@
 param(
     [string]$KeytoolPath = "",
-    [string]$SigningDirectory = "$env:LOCALAPPDATA\CodexTools\hyperos-offline-ledger\signing",
+    [string]$SigningDirectory = "$env:LOCALAPPDATA\CodexTools\android-vlm-ledger\signing",
     [string]$Alias = "ledger-release"
 )
 

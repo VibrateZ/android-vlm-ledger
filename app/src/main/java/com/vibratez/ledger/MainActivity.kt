@@ -13,6 +13,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -30,12 +32,13 @@ import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.automirrored.filled.ReceiptLong
 import androidx.compose.material.icons.filled.Save
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -51,6 +54,10 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.Typography
+import androidx.compose.material3.Shapes
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -62,13 +69,21 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.annotation.RequiresApi
 import com.vibratez.ledger.ledger.LedgerDecision
 import com.vibratez.ledger.ledger.LedgerStore
+import com.vibratez.ledger.ledger.PendingReview
+import com.vibratez.ledger.ledger.PendingReviewStore
+import com.vibratez.ledger.background.LedgerWorkScheduler
 import com.vibratez.ledger.photo.AutoBookSaveState
 import com.vibratez.ledger.photo.MediaStorePhotoRepository
 import com.vibratez.ledger.photo.PhotoProcessingResult
@@ -88,6 +103,13 @@ import java.util.Locale
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val startupSettings = SecureSettings(this).load()
+        LedgerWorkScheduler.reconcile(
+            this,
+            startupSettings.cloudEnabled &&
+                startupSettings.backgroundAutoProcessingEnabled &&
+                hasFullPhotoReadPermission(this),
+        )
         setContent {
             LedgerTheme {
                 LedgerApp()
@@ -98,8 +120,107 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun LedgerTheme(content: @Composable () -> Unit) {
-    MaterialTheme(content = content)
+    MaterialTheme(
+        colorScheme = if (isSystemInDarkTheme()) LedgerDarkColors else LedgerLightColors,
+        typography = LedgerTypography,
+        shapes = LedgerShapes,
+        content = content,
+    )
 }
+
+private val LedgerDeepGreen = Color(0xFF263D37)
+private val LedgerMint = Color(0xFF7D958D)
+private val LedgerGold = Color(0xFFB99249)
+
+private val LedgerLightColors = lightColorScheme(
+    primary = LedgerDeepGreen,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFE1E8E5),
+    onPrimaryContainer = Color(0xFF1B302A),
+    secondary = Color(0xFF5F6D68),
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFE7EAE8),
+    onSecondaryContainer = Color(0xFF303936),
+    tertiary = Color(0xFF735B27),
+    onTertiary = Color.White,
+    tertiaryContainer = Color(0xFFF2E5C5),
+    onTertiaryContainer = Color(0xFF392E16),
+    background = Color(0xFFF7F7F5),
+    onBackground = Color(0xFF202321),
+    surface = Color(0xFFFFFFFF),
+    onSurface = Color(0xFF202321),
+    surfaceVariant = Color(0xFFEBEDEB),
+    onSurfaceVariant = Color(0xFF5C625F),
+    outline = Color(0xFF858B88),
+    error = Color(0xFFBA1A1A),
+)
+
+private val LedgerDarkColors = darkColorScheme(
+    primary = LedgerMint,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFF344C45),
+    onPrimaryContainer = Color(0xFFD5E4DF),
+    secondary = Color(0xFFBCC5C1),
+    onSecondary = Color(0xFF29332F),
+    secondaryContainer = Color(0xFF3D4542),
+    onSecondaryContainer = Color(0xFFDCE3E0),
+    tertiary = LedgerGold,
+    onTertiary = Color(0xFF442F00),
+    tertiaryContainer = Color(0xFF604600),
+    onTertiaryContainer = Color(0xFFFFDEA0),
+    background = Color(0xFF171918),
+    onBackground = Color(0xFFE5E7E5),
+    surface = Color(0xFF202321),
+    onSurface = Color(0xFFE5E7E5),
+    surfaceVariant = Color(0xFF303431),
+    onSurfaceVariant = Color(0xFFC5CAC7),
+    outline = Color(0xFF929895),
+    error = Color(0xFFFFB4AB),
+)
+
+private val LedgerTypography = Typography(
+    titleLarge = TextStyle(
+        fontSize = 22.sp,
+        lineHeight = 28.sp,
+        fontWeight = FontWeight.SemiBold,
+        letterSpacing = 0.sp,
+    ),
+    titleMedium = TextStyle(
+        fontSize = 17.sp,
+        lineHeight = 24.sp,
+        fontWeight = FontWeight.SemiBold,
+        letterSpacing = 0.sp,
+    ),
+    bodyLarge = TextStyle(
+        fontSize = 16.sp,
+        lineHeight = 24.sp,
+        letterSpacing = 0.sp,
+    ),
+    bodyMedium = TextStyle(
+        fontSize = 14.sp,
+        lineHeight = 21.sp,
+        letterSpacing = 0.sp,
+    ),
+    bodySmall = TextStyle(
+        fontSize = 12.sp,
+        lineHeight = 18.sp,
+        letterSpacing = 0.sp,
+    ),
+    labelLarge = TextStyle(
+        fontSize = 14.sp,
+        lineHeight = 20.sp,
+        fontWeight = FontWeight.Medium,
+        letterSpacing = 0.sp,
+    ),
+)
+
+private val LedgerShapes = Shapes(
+    extraSmall = RoundedCornerShape(6.dp),
+    small = RoundedCornerShape(8.dp),
+    medium = RoundedCornerShape(8.dp),
+    large = RoundedCornerShape(8.dp),
+    extraLarge = RoundedCornerShape(8.dp),
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -108,6 +229,7 @@ private fun LedgerApp() {
     val secureSettings = remember { SecureSettings(context.applicationContext) }
     val photoRepository = remember { MediaStorePhotoRepository(context.applicationContext) }
     val ledgerStore = remember { LedgerStore(context.applicationContext) }
+    val pendingReviewStore = remember { PendingReviewStore(context.applicationContext) }
     val vlmClient = remember {
         OpenAiVlmClient(loadSystemPrompt(context))
     }
@@ -135,6 +257,7 @@ private fun LedgerApp() {
     var processingResults by remember { mutableStateOf<List<PhotoProcessingResult>>(emptyList()) }
     var deleteMessage by remember { mutableStateOf<String?>(null) }
     var ledgerCount by remember { mutableIntStateOf(0) }
+    var pendingReviews by remember { mutableStateOf<List<PendingReview>>(emptyList()) }
     var hasPhotoPermission by remember { mutableStateOf(hasPhotoReadPermission(context)) }
     var pendingLegacyDelete by remember { mutableStateOf<Uri?>(null) }
     var mediaStoreChanged by remember { mutableStateOf(false) }
@@ -142,8 +265,21 @@ private fun LedgerApp() {
         mutableStateOf<List<BookedPhotoPrompt>>(emptyList())
     }
 
-    DisposableEffect(photoRepository) {
-        val registration = photoRepository.observeChanges { mediaStoreChanged = true }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { }
+
+    DisposableEffect(
+        photoRepository,
+        settings.backgroundAutoProcessingEnabled,
+        hasPhotoPermission,
+    ) {
+        val registration = photoRepository.observeChanges {
+            mediaStoreChanged = true
+            if (settings.backgroundAutoProcessingEnabled && hasFullPhotoReadPermission(context)) {
+                LedgerWorkScheduler.enqueueNow(context)
+            }
+        }
         onDispose { registration.close() }
     }
 
@@ -151,6 +287,10 @@ private fun LedgerApp() {
         ActivityResultContracts.RequestMultiplePermissions(),
     ) {
         hasPhotoPermission = hasFullPhotoReadPermission(context)
+        LedgerWorkScheduler.reconcile(
+            context,
+            hasPhotoPermission && settings.cloudEnabled && settings.backgroundAutoProcessingEnabled,
+        )
         if (!hasPhotoPermission) {
             scope.launch { snackbar.showSnackbar("未获得照片权限，自动识别已暂停") }
         }
@@ -286,6 +426,7 @@ private fun LedgerApp() {
 
     LaunchedEffect(Unit) {
         ledgerCount = ledgerStore.all().size
+        pendingReviews = pendingReviewStore.pending()
     }
 
     Scaffold(
@@ -294,15 +435,20 @@ private fun LedgerApp() {
                 title = { Text("云端智能记账") },
                 navigationIcon = {
                     Icon(
-                        imageVector = Icons.Default.Settings,
+                        imageVector = Icons.AutoMirrored.Filled.ReceiptLong,
                         contentDescription = null,
                         modifier = Modifier.padding(start = 12.dp),
                     )
                 },
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(),
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                    containerColor = LedgerDeepGreen,
+                    titleContentColor = Color.White,
+                    navigationIconContentColor = LedgerMint,
+                ),
             )
         },
         snackbarHost = { SnackbarHost(snackbar) },
+        containerColor = MaterialTheme.colorScheme.background,
     ) { padding ->
         LazyColumn(
             modifier = Modifier
@@ -313,7 +459,11 @@ private fun LedgerApp() {
         ) {
             item {
                 Spacer(Modifier.height(4.dp))
-                Text("云端识别设置", style = MaterialTheme.typography.titleLarge)
+                Text(
+                    "云端识别设置",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                )
                 Text(
                     "照片只在你开启此开关并同意后发送到配置的 VLM 服务。",
                     style = MaterialTheme.typography.bodyMedium,
@@ -321,7 +471,17 @@ private fun LedgerApp() {
                 )
             }
             item {
-                Card(Modifier.fillMaxWidth()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surface,
+                    ),
+                    border = BorderStroke(
+                        1.dp,
+                        MaterialTheme.colorScheme.outline.copy(alpha = 0.24f),
+                    ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                ) {
                     Column(
                         Modifier.padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -335,7 +495,11 @@ private fun LedgerApp() {
                                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Icon(Icons.Default.Cloud, contentDescription = null)
+                                Icon(
+                                    Icons.Default.Cloud,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.tertiary,
+                                )
                                 Column {
                                     Text("启用云端识别")
                                     Text(
@@ -351,9 +515,65 @@ private fun LedgerApp() {
                                     if (checked) {
                                         showConsent = true
                                     } else {
-                                        val updated = settings.copy(cloudEnabled = false)
+                                        val updated = settings.copy(
+                                            cloudEnabled = false,
+                                            backgroundAutoProcessingEnabled = false,
+                                        )
                                         secureSettings.save(updated, null)
                                         settings = secureSettings.load()
+                                        LedgerWorkScheduler.reconcile(context, false)
+                                    }
+                                },
+                            )
+                        }
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("后台自动处理")
+                                Text(
+                                    if (settings.backgroundAutoProcessingEnabled) {
+                                        "应用未打开时也会扫描并发送新截图"
+                                    } else {
+                                        "默认关闭，仅手动识别"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Switch(
+                                checked = settings.backgroundAutoProcessingEnabled,
+                                onCheckedChange = { checked ->
+                                    if (checked && !settings.cloudEnabled) {
+                                        scope.launch { snackbar.showSnackbar("请先启用云端识别") }
+                                    } else if (checked && !hasPhotoPermission) {
+                                        scope.launch { snackbar.showSnackbar("请先授予完整照片读取权限") }
+                                    } else {
+                                        val storedKey = secureSettings.readApiKey()
+                                        val validation = validateSettings(
+                                            settings.baseUrl,
+                                            settings.model,
+                                            settings.timeoutSeconds,
+                                            storedKey,
+                                        )
+                                        if (checked && validation != null) {
+                                            scope.launch { snackbar.showSnackbar(validation) }
+                                            return@Switch
+                                        }
+                                        val updated = settings.copy(backgroundAutoProcessingEnabled = checked)
+                                        secureSettings.save(updated, null)
+                                        settings = secureSettings.load()
+                                        LedgerWorkScheduler.reconcile(context, checked && settings.cloudEnabled)
+                                        if (checked && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                            ContextCompat.checkSelfPermission(
+                                                context,
+                                                Manifest.permission.POST_NOTIFICATIONS,
+                                            ) != PackageManager.PERMISSION_GRANTED
+                                        ) {
+                                            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                        }
                                     }
                                 },
                             )
@@ -391,8 +611,15 @@ private fun LedgerApp() {
                                 TextButton(
                                     onClick = {
                                         secureSettings.clearApiKey()
-                                        secureSettings.save(settings.copy(cloudEnabled = false), null)
+                                        secureSettings.save(
+                                            settings.copy(
+                                                cloudEnabled = false,
+                                                backgroundAutoProcessingEnabled = false,
+                                            ),
+                                            null,
+                                        )
                                         settings = secureSettings.load()
+                                        LedgerWorkScheduler.reconcile(context, false)
                                         apiKey = ""
                                         connectionText = null
                                         scope.launch { snackbar.showSnackbar("API Key 已清除，云端识别已关闭") }
@@ -483,6 +710,10 @@ private fun LedgerApp() {
                                         key,
                                     )
                                     settings = secureSettings.load()
+                                    LedgerWorkScheduler.reconcile(
+                                        context,
+                                        settings.cloudEnabled && settings.backgroundAutoProcessingEnabled,
+                                    )
                                     apiKey = ""
                                     saving = false
                                     scope.launch { snackbar.showSnackbar("设置已保存") }
@@ -515,8 +746,14 @@ private fun LedgerApp() {
                 }
             }
             item {
-                HorizontalDivider()
-                Text("最近截图", style = MaterialTheme.typography.titleLarge)
+                HorizontalDivider(
+                    color = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f),
+                )
+                Text(
+                    "最近截图",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                )
                 Text(
                     "仅读取 MediaStore 中近期、已写入完成且符合截图命名/目录特征的图片；原图不复制到应用目录。",
                     style = MaterialTheme.typography.bodyMedium,
@@ -611,7 +848,11 @@ private fun LedgerApp() {
             }
             if (processingResults.isNotEmpty()) {
                 item {
-                    Text("处理结果", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        "处理结果",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
                 }
                 items(processingResults) { result ->
                     ProcessingResultCard(
@@ -629,11 +870,39 @@ private fun LedgerApp() {
                     )
                 }
             }
+            if (pendingReviews.isNotEmpty()) {
+                item {
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.28f),
+                    )
+                    Text(
+                        "后台待确认",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(
+                        "后台识别结果已保存为结构化记录，确认后才会写入本地账本。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                items(pendingReviews, key = { it.id }) { review ->
+                    PendingReviewCard(
+                        review = review,
+                        ledgerStore = ledgerStore,
+                        reviewStore = pendingReviewStore,
+                        onResolved = {
+                            pendingReviews = pendingReviews.filterNot { it.id == review.id }
+                            if (it) ledgerCount += 1
+                        },
+                    )
+                }
+            }
             item {
                 Text(
                     "本地账目：" + ledgerCount + " 条",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.tertiary,
                     modifier = Modifier.padding(bottom = 20.dp),
                 )
             }
@@ -655,6 +924,10 @@ private fun LedgerApp() {
                         val updated = settings.copy(cloudEnabled = true)
                         secureSettings.save(updated, null)
                         settings = secureSettings.load()
+                        LedgerWorkScheduler.reconcile(
+                            context,
+                            settings.backgroundAutoProcessingEnabled && hasPhotoPermission,
+                        )
                         showConsent = false
                     },
                 ) { Text("确认启用") }
@@ -695,6 +968,71 @@ private fun LedgerApp() {
 }
 
 @Composable
+private fun PendingReviewCard(
+    review: PendingReview,
+    ledgerStore: LedgerStore,
+    reviewStore: PendingReviewStore,
+    onResolved: (Boolean) -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var saving by remember(review.id) { mutableStateOf(false) }
+    var saved by remember(review.id) { mutableStateOf(false) }
+    var dismissed by remember(review.id) { mutableStateOf(false) }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outline.copy(alpha = 0.24f),
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("后台识别：${review.sourceUri.substringAfterLast('/').ifBlank { "截图" }}")
+            LedgerConfirmationEditor(
+                ledger = review.ledger,
+                saving = saving,
+                saved = saved,
+                alreadyStored = dismissed,
+                onConfirm = { corrected ->
+                    if (saving || saved || dismissed) return@LedgerConfirmationEditor
+                    saving = true
+                    scope.launch {
+                        try {
+                            val record = ledgerStore.addIfAbsent(
+                                corrected,
+                                review.sha256,
+                                sourceUri = review.sourceUri,
+                                vlmModel = review.vlmModel,
+                                vlmRequestId = review.vlmRequestId,
+                                screenshotCapturedAtMillis = review.screenshotCapturedAtMillis,
+                                localDecision = "USER_CONFIRMED",
+                            )
+                            reviewStore.confirm(review.id)
+                            saved = record != null || ledgerStore.containsHash(review.sha256)
+                            onResolved(record != null)
+                        } finally {
+                            saving = false
+                        }
+                    }
+                },
+            )
+            OutlinedButton(
+                onClick = {
+                    scope.launch {
+                        reviewStore.dismiss(review.id)
+                        dismissed = true
+                        onResolved(false)
+                    }
+                },
+                enabled = !saving && !saved && !dismissed,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("忽略此待确认记录") }
+        }
+    }
+}
+
+@Composable
 private fun ProcessingResultCard(
     result: PhotoProcessingResult,
     onDelete: (Uri) -> Unit,
@@ -703,7 +1041,15 @@ private fun ProcessingResultCard(
     onBooked: () -> Unit,
 ) {
     val cardScope = rememberCoroutineScope()
-    Card(Modifier.fillMaxWidth()) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outline.copy(alpha = 0.24f),
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
         Column(
             Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
