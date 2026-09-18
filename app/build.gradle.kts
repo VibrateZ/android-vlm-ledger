@@ -31,8 +31,8 @@ android {
         applicationId = "com.vibratez.ledger"
         minSdk = 26
         targetSdk = 37
-        versionCode = 5
-        versionName = "0.4.1"
+        versionCode = 6
+        versionName = "0.4.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

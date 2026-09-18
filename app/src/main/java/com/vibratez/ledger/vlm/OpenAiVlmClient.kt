@@ -393,7 +393,7 @@ class OpenAiVlmClient(
     }
 
     private fun buildUserContext(@Suppress("UNUSED_PARAMETER") request: VlmRequest): String =
-        "只提取 is_history、amount_minor 和 expense_target。不要读取时间。只返回 ledger.capture.v1 JSON。\n/no_think"
+        "只提取 is_history、has_purchase_actions、amount_minor 和 expense_target。出现‘立即购买’或‘加入购物车’按钮时 has_purchase_actions=true。不要读取时间。只返回 ledger.capture.v1 JSON。\n/no_think"
 
     internal fun classifyChatCompletionsResponse(
         response: HttpResult,
@@ -592,6 +592,8 @@ class OpenAiVlmClient(
         }
         val isHistory = root.opt("is_history") as? Boolean
             ?: return ParseResult.Invalid("is_history")
+        val hasPurchaseActions = root.opt("has_purchase_actions") as? Boolean
+            ?: return ParseResult.Invalid("has_purchase_actions")
         val amount = when (val raw = root.opt("amount_minor")) {
             JSONObject.NULL -> null
             is Number -> raw.toString().takeIf { Regex("[1-9][0-9]*").matches(it) }
@@ -610,9 +612,11 @@ class OpenAiVlmClient(
             runCatching { OffsetDateTime.parse(it) }.getOrNull()
         }
         val platform = platformForPackage(context.sourcePackage)
-        val canBook = !isHistory && amount != null && capturedAt != null && platform != Platform.UNKNOWN
+        val canBook = !isHistory && !hasPurchaseActions && amount != null &&
+            capturedAt != null && platform != Platform.UNKNOWN
         val reasonCode = when {
             isHistory -> "STALE_TRANSACTION"
+            hasPurchaseActions -> "NOT_PAYMENT_PAGE"
             amount == null -> "MISSING_AMOUNT"
             capturedAt == null -> "MISSING_TIME"
             platform == Platform.UNKNOWN -> "UNSUPPORTED_PLATFORM"
@@ -632,11 +636,11 @@ class OpenAiVlmClient(
         return ParseResult.Valid(
             LedgerV1(
                 decision = when {
-                    isHistory -> Decision.REJECT
+                    isHistory || hasPurchaseActions -> Decision.REJECT
                     canBook -> Decision.AUTO_BOOK
                     else -> Decision.NEEDS_CONFIRMATION
                 },
-                isPaymentScreenshot = !isHistory,
+                isPaymentScreenshot = !isHistory && !hasPurchaseActions,
                 platform = platform,
                 direction = Direction.EXPENSE,
                 amountMinor = amount,
@@ -650,7 +654,11 @@ class OpenAiVlmClient(
                 confidence = if (canBook) 0.99 else 0.0,
                 evidence = Evidence(
                     positiveFeatures = positive,
-                    negativeFeatures = if (isHistory) listOf("HISTORY_DETAIL") else emptyList(),
+                    negativeFeatures = when {
+                        isHistory -> listOf("HISTORY_DETAIL")
+                        hasPurchaseActions -> listOf("NON_PAYMENT")
+                        else -> emptyList()
+                    },
                     freshness = when {
                         isHistory -> Freshness.STALE
                         capturedAt != null -> Freshness.VALID
@@ -845,10 +853,11 @@ class OpenAiVlmClient(
         """
         {
           "type":"object","additionalProperties":false,
-          "required":["schema_version","is_history","amount_minor","expense_target"],
+          "required":["schema_version","is_history","has_purchase_actions","amount_minor","expense_target"],
           "properties":{
             "schema_version":{"const":"ledger.capture.v1"},
             "is_history":{"type":"boolean"},
+            "has_purchase_actions":{"type":"boolean"},
             "amount_minor":{"anyOf":[{"type":"integer","minimum":1},{"type":"null"}]},
             "expense_target":{"anyOf":[{"type":"string","maxLength":120},{"type":"null"}]}
           }
@@ -865,13 +874,16 @@ class OpenAiVlmClient(
         const val MAX_BASE_URL_CHARS = 2_048
         const val MAX_RETRY_AFTER_MILLIS = 30_000L
         const val CAPTURE_SCHEMA_VERSION = "ledger.capture.v1"
-        val CAPTURE_KEYS = setOf("schema_version", "is_history", "amount_minor", "expense_target")
+        val CAPTURE_KEYS = setOf(
+            "schema_version", "is_history", "has_purchase_actions",
+            "amount_minor", "expense_target",
+        )
 
         fun usesQwenThinkingControl(model: String): Boolean =
             model.substringAfterLast('/').startsWith("Qwen3", ignoreCase = true)
         const val IMAGE_DATA_PLACEHOLDER = "LEDGER_IMAGE_DATA_7F3A4B2D9C8E"
         const val DEFAULT_SYSTEM_PROMPT =
-            "你是截图记账字段提取器。只判断页面是否明确含历史记录字样，并提取唯一金额和支出对象；" +
+            "你是截图记账字段提取器。判断页面是否明确含历史记录字样或‘立即购买/加入购物车’按钮，并提取唯一金额和支出对象；" +
                 "不要读取或判断时间。只输出 ledger.capture.v1 JSON，不得输出解释、推理或 Markdown。"
     }
 }

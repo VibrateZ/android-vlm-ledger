@@ -237,6 +237,7 @@ class OpenAiVlmClientTest {
                 JSONObject()
                     .put("schema_version", "ledger.capture.v1")
                     .put("is_history", false)
+                    .put("has_purchase_actions", false)
                     .put("amount_minor", 1280)
                     .put("expense_target", "Cafe")
                     .toString(),
@@ -251,6 +252,33 @@ class OpenAiVlmClientTest {
         assertEquals(1280L, result.response.ledger.amountMinor)
         assertEquals("2026-09-18T12:30+08:00", result.response.ledger.occurredAt.toString())
         assertEquals(Platform.WECHAT, result.response.ledger.platform)
+    }
+
+    @Test
+    fun captureResponseRejectsProductPageWithPurchaseButtons() {
+        val response = JSONObject()
+            .put("choices", JSONArray().put(JSONObject().put("message", JSONObject().put(
+                "content",
+                JSONObject()
+                    .put("schema_version", "ledger.capture.v1")
+                    .put("is_history", false)
+                    .put("has_purchase_actions", true)
+                    .put("amount_minor", 1280)
+                    .put("expense_target", "Example shop")
+                    .toString(),
+            )))).toString()
+        val result = client.classifyChatCompletionsResponse(
+            HttpResult(200, response), "request-id", "Qwen/Qwen3.5-35B-A3B",
+            request("Qwen/Qwen3.5-35B-A3B").copy(
+                screenshotCapturedAt = "2026-09-18T12:30:00+08:00",
+                sourcePackage = "com.xunmeng.pinduoduo",
+            ),
+        ) as VlmAnalyzeResult.Success
+
+        assertEquals(Decision.REJECT, result.response.ledger.decision)
+        assertEquals("NOT_PAYMENT_PAGE", result.response.ledger.evidence.reasonCode)
+        assertEquals(listOf("NON_PAYMENT"), result.response.ledger.evidence.negativeFeatures)
+        assertFalse("PAYMENT_SUCCESS" in result.response.ledger.evidence.positiveFeatures)
     }
 
     @Test
@@ -661,14 +689,15 @@ class OpenAiVlmClientTest {
     }
 
     @Test
-    fun requestSchemaOnlyAsksForHistoryAmountAndExpenseTarget() {
+    fun requestSchemaAsksForHistoryPurchaseActionsAmountAndExpenseTarget() {
         val schema = client.captureSchema()
         val properties = schema.getJSONObject("properties")
         val amount = properties.getJSONObject("amount_minor")
             .getJSONArray("anyOf")
             .getJSONObject(0)
 
-        assertEquals(setOf("schema_version", "is_history", "amount_minor", "expense_target"),
+        assertEquals(
+            setOf("schema_version", "is_history", "has_purchase_actions", "amount_minor", "expense_target"),
             properties.keys().asSequence().toSet())
         assertEquals(1, amount.getInt("minimum"))
         assertFalse(properties.has("occurred_at"))
