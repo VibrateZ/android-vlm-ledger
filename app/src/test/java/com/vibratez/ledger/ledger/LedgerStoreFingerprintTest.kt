@@ -36,6 +36,17 @@ class LedgerStoreFingerprintTest {
     }
 
     @Test
+    fun sameTimeAndAmountButDifferentProjectIsNotDuplicate() {
+        val first = ledger().copy(merchant = "商户 A")
+        val second = first.copy(merchant = "商户 B")
+
+        assertNotEquals(
+            LedgerStore.transactionFingerprint(first),
+            LedgerStore.transactionFingerprint(second),
+        )
+    }
+
+    @Test
     fun platformExternalIdIsStableAcrossPresentationChanges() {
         val first = ledger().copy(externalId = "order-123", merchant = "商户 A")
         val second = first.copy(

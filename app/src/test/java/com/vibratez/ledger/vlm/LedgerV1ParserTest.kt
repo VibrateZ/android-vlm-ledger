@@ -38,12 +38,66 @@ class LedgerV1ParserTest {
     }
 
     @Test
-    fun rejectsAutoBookWithEstimatedTime() {
+    fun acceptsFreshWeChatSuccessWithEstimatedScreenshotTime() {
         val result = LedgerV1Parser.parse(
             validPayload()
-                .replace("\"time_source\":\"PAGE_EXACT\"", "\"time_source\":\"SCREENSHOT_ESTIMATED\""),
+                .replace("\"time_source\":\"PAGE_EXACT\"", "\"time_source\":\"SCREENSHOT_ESTIMATED\"")
+                .replace("\"PAGE_EXACT_TIME\"", "\"MERCHANT_MARKER\",\"FRESH_TIME\""),
         )
-        assertTrue(result is ParseResult.Invalid)
+        assertTrue(result is ParseResult.Valid)
+    }
+
+    @Test
+    fun acceptsFreshAlipaySuccessWithEstimatedScreenshotTime() {
+        val result = LedgerV1Parser.parse(
+            validPayload()
+                .replace("\"platform\":\"WECHAT\"", "\"platform\":\"ALIPAY\"")
+                .replace("\"time_source\":\"PAGE_EXACT\"", "\"time_source\":\"SCREENSHOT_ESTIMATED\"")
+                .replace("\"PAGE_EXACT_TIME\"", "\"MERCHANT_MARKER\",\"FRESH_TIME\""),
+        )
+        assertTrue(result is ParseResult.Valid)
+    }
+
+    @Test
+    fun rejectsEstimatedSuccessBasedOnStatusAndAmountWithoutPayeeStructure() {
+        val result = LedgerV1Parser.parse(
+            validPayload()
+                .replace("\"time_source\":\"PAGE_EXACT\"", "\"time_source\":\"SCREENSHOT_ESTIMATED\"")
+                .replace("\"PAGE_EXACT_TIME\"", "\"FRESH_TIME\""),
+        )
+        assertEquals("auto_book_invariants", (result as ParseResult.Invalid).reason)
+    }
+
+    @Test
+    fun rejectsEstimatedSuccessWhenPayeeMarkerHasNoExtractedPayee() {
+        val result = LedgerV1Parser.parse(
+            validPayload()
+                .replace("\"merchant\":\"Cafe\"", "\"merchant\":null")
+                .replace("\"time_source\":\"PAGE_EXACT\"", "\"time_source\":\"SCREENSHOT_ESTIMATED\"")
+                .replace("\"PAGE_EXACT_TIME\"", "\"MERCHANT_MARKER\",\"FRESH_TIME\""),
+        )
+        assertEquals("auto_book_invariants", (result as ParseResult.Invalid).reason)
+    }
+
+    @Test
+    fun rejectsEstimatedSuccessInNonNativeContexts() {
+        listOf("CHAT_THREAD", "BILL_LIST", "HISTORY_DETAIL", "SHARE_POSTER", "IMAGE_PREVIEW")
+            .forEach { negativeFeature ->
+                val result = LedgerV1Parser.parse(
+                    validPayload()
+                        .replace("\"time_source\":\"PAGE_EXACT\"", "\"time_source\":\"SCREENSHOT_ESTIMATED\"")
+                        .replace("\"PAGE_EXACT_TIME\"", "\"MERCHANT_MARKER\",\"FRESH_TIME\"")
+                        .replace(
+                            "\"negative_features\":[]",
+                            "\"negative_features\":[\"$negativeFeature\"]",
+                        ),
+                )
+                assertEquals(
+                    negativeFeature,
+                    "auto_book_invariants",
+                    (result as ParseResult.Invalid).reason,
+                )
+            }
     }
 
     @Test

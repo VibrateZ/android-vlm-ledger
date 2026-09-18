@@ -17,6 +17,7 @@ data class PhotoEvidence(
     val sha256: String,
     val screenshotCapturedAtMillis: Long?,
     val notificationMatchedAtMillis: Long? = null,
+    val screenshotSourcePackage: String? = null,
 )
 
 sealed interface LedgerDecision {
@@ -42,6 +43,12 @@ class LedgerDecisionEngine {
     }
 
     private fun canAutoBook(ledger: LedgerV1, evidence: PhotoEvidence): Boolean {
+        val sourcePlatform = when (evidence.screenshotSourcePackage?.lowercase()) {
+            "com.tencent.mm" -> Platform.WECHAT
+            "com.eg.android.alipaygphone" -> Platform.ALIPAY
+            null -> return false
+            else -> Platform.OTHER
+        }
         if (ledger.decision != Decision.AUTO_BOOK ||
             !ledger.isPaymentScreenshot ||
             ledger.platform == Platform.UNKNOWN ||
@@ -55,6 +62,7 @@ class LedgerDecisionEngine {
         ) {
             return false
         }
+        if (ledger.platform != sourcePlatform) return false
 
         val positive = ledger.evidence.positiveFeatures
         val expectedSuccess = when (ledger.direction) {
@@ -90,6 +98,20 @@ class LedgerDecisionEngine {
             TimeSource.NOTIFICATION_MATCHED -> {
                 if ("NOTIFICATION_MATCH" !in positive) return false
                 evidence.notificationMatchedAtMillis
+            }
+            TimeSource.SCREENSHOT_ESTIMATED -> {
+                val isImmediateNativePaymentSuccess =
+                    ledger.platform != Platform.UNKNOWN &&
+                    ledger.direction in setOf(Direction.EXPENSE, Direction.INCOME, Direction.REFUND) &&
+                    (ledger.merchant != null || ledger.counterparty != null) &&
+                    ledger.evidence.reasonCode in setOf(
+                        "PAYMENT_PAGE_CONFIRMED",
+                        "INCOME_PAGE_CONFIRMED",
+                        "REFUND_PAGE_CONFIRMED",
+                    ) &&
+                    "FRESH_TIME" in positive
+                if (!isImmediateNativePaymentSuccess) return false
+                evidence.screenshotCapturedAtMillis
             }
             else -> null
         } ?: return false

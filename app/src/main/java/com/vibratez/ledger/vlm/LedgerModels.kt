@@ -73,6 +73,7 @@ data class VlmRequest(
     val screenshotCapturedAt: String?,
     val deviceTimezone: String,
     val notificationMatchJson: String? = null,
+    val sourcePackage: String? = null,
 )
 
 data class VlmResponse(

@@ -9,6 +9,7 @@ import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
 import java.time.Duration
+import java.time.OffsetDateTime
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Base64
@@ -86,6 +87,11 @@ sealed interface ConnectionResult {
     data class Failure(val category: FailureCategory, val detail: String) : ConnectionResult
 }
 
+enum class VlmApiProtocol {
+    RESPONSES,
+    CHAT_COMPLETIONS,
+}
+
 /**
  * Dependency-free OpenAI-compatible client. The API key never appears in URLs,
  * request bodies, exceptions, or returned diagnostics.
@@ -98,7 +104,7 @@ class OpenAiVlmClient(
         apiKey: String,
         request: VlmRequest,
         timeoutSeconds: Int,
-        allowAdditionalUpload: () -> Boolean = { true },
+        protocol: VlmApiProtocol = VlmApiProtocol.RESPONSES,
     ): VlmAnalyzeResult {
         if (!isValidApiKey(apiKey) || !isValidModel(request.model)) {
             return VlmAnalyzeResult.Failure(
@@ -114,7 +120,7 @@ class OpenAiVlmClient(
                 detail = "image_over_12_mib",
             )
         }
-        val endpoint = runCatching { normalizeEndpoint(baseUrl) }.getOrElse {
+        val endpoint = runCatching { normalizeEndpoint(baseUrl, protocol) }.getOrElse {
             return VlmAnalyzeResult.Failure(
                 FailureCategory.INVALID_CONFIGURATION,
                 retryable = false,
@@ -122,33 +128,26 @@ class OpenAiVlmClient(
             )
         }
         val requestId = UUID.randomUUID().toString()
-        val first = execute(
-            endpoint = endpoint,
-            method = "POST",
-            apiKey = apiKey,
-            body = null,
-            timeoutSeconds = timeoutSeconds,
-            streamingBody = buildStreamingRequestBody(request, includeJsonSchema = true),
-        )
-        val result = classifyAnalyzeResponse(first, requestId, request.model)
-        if (result is VlmAnalyzeResult.Failure &&
-            first.failure == null &&
-            !first.bodyTruncated &&
-            first.code == HTTP_BAD_REQUEST &&
-            explicitlyRejectsStructuredOutput(first.body) &&
-            runCatching(allowAdditionalUpload).getOrDefault(false)
-        ) {
-            val fallback = execute(
+        if (protocol == VlmApiProtocol.CHAT_COMPLETIONS) {
+            val response = execute(
                 endpoint = endpoint,
                 method = "POST",
                 apiKey = apiKey,
                 body = null,
                 timeoutSeconds = timeoutSeconds,
-                streamingBody = buildStreamingRequestBody(request, includeJsonSchema = false),
+                streamingBody = buildChatCompletionsRequestBody(request),
             )
-            return classifyAnalyzeResponse(fallback, requestId, request.model)
+            return classifyChatCompletionsResponse(response, requestId, request.model, request)
         }
-        return result
+        val response = execute(
+            endpoint = endpoint,
+            method = "POST",
+            apiKey = apiKey,
+            body = null,
+            timeoutSeconds = timeoutSeconds,
+            streamingBody = buildStreamingRequestBody(request),
+        )
+        return classifyAnalyzeResponse(response, requestId, request.model, request)
     }
 
     suspend fun testConnection(
@@ -156,14 +155,18 @@ class OpenAiVlmClient(
         apiKey: String,
         model: String,
         timeoutSeconds: Int,
+        protocol: VlmApiProtocol = VlmApiProtocol.RESPONSES,
     ): ConnectionResult {
         if (!isValidApiKey(apiKey) || !isValidModel(model)) {
             return ConnectionResult.Failure(FailureCategory.INVALID_CONFIGURATION, "missing_configuration")
         }
-        val endpoint = runCatching { normalizeEndpoint(baseUrl) }.getOrElse {
+        val endpoint = runCatching { normalizeEndpoint(baseUrl, protocol) }.getOrElse {
             return ConnectionResult.Failure(FailureCategory.INVALID_CONFIGURATION, "invalid_base_url")
         }
-        val modelsEndpoint = endpoint.removeSuffix("/chat/completions") + "/models"
+        val modelsEndpoint = when (protocol) {
+            VlmApiProtocol.RESPONSES -> endpoint.removeSuffix("/responses") + "/models"
+            VlmApiProtocol.CHAT_COMPLETIONS -> endpoint.removeSuffix("/chat/completions") + "/models"
+        }
         val response = execute(
             endpoint = modelsEndpoint,
             method = "GET",
@@ -182,26 +185,39 @@ class OpenAiVlmClient(
                 val data = JSONObject(response.body).optJSONArray("data") ?: return@runCatching false
                 (0 until data.length()).any { data.optJSONObject(it)?.optString("id") == model }
             }.getOrDefault(false)
+            if (protocol == VlmApiProtocol.CHAT_COMPLETIONS) {
+                return testChatContentCapability(
+                    endpoint = endpoint,
+                    apiKey = apiKey,
+                    model = model,
+                    timeoutSeconds = timeoutSeconds,
+                    modelAvailable = available,
+                )
+            }
             return ConnectionResult.Success(modelAvailable = available)
         }
         if (response.code == 404 || response.code == 405) {
+            if (protocol == VlmApiProtocol.CHAT_COMPLETIONS) {
+                return testChatContentCapability(
+                    endpoint = endpoint,
+                    apiKey = apiKey,
+                    model = model,
+                    timeoutSeconds = timeoutSeconds,
+                    modelAvailable = false,
+                )
+            }
+            val probeBody = when (protocol) {
+                VlmApiProtocol.RESPONSES -> JSONObject()
+                    .put("model", model)
+                    .put("input", "只返回 OK")
+                    .put("max_output_tokens", 8)
+                VlmApiProtocol.CHAT_COMPLETIONS -> error("handled above")
+            }
             val probe = execute(
                 endpoint = endpoint,
                 method = "POST",
                 apiKey = apiKey,
-                body = JSONObject()
-                    .put("model", model)
-                    .put("temperature", 0)
-                    .put("max_tokens", 8)
-                    .put(
-                        "messages",
-                        JSONArray().put(
-                            JSONObject()
-                                .put("role", "user")
-                                .put("content", "只返回 OK"),
-                        ),
-                    )
-                    .toString(),
+                body = probeBody.toString(),
                 timeoutSeconds = timeoutSeconds,
             )
             probe.failure?.let { failure ->
@@ -219,13 +235,74 @@ class OpenAiVlmClient(
         return ConnectionResult.Failure(categoryFor(response.code), "models_http_" + response.code)
     }
 
+    private fun testChatContentCapability(
+        endpoint: String,
+        apiKey: String,
+        model: String,
+        timeoutSeconds: Int,
+        modelAvailable: Boolean,
+    ): ConnectionResult = classifyChatContentProbe(
+        response = execute(
+            endpoint = endpoint,
+            method = "POST",
+            apiKey = apiKey,
+            body = buildChatContentProbeBody(model).toString(),
+            timeoutSeconds = timeoutSeconds,
+        ),
+        modelAvailable = modelAvailable,
+    )
+
+    internal fun buildChatContentProbeBody(model: String): JSONObject {
+        return JSONObject()
+            .put("model", model)
+            .put(
+                "messages",
+                JSONArray().put(
+                    JSONObject()
+                        .put("role", "user")
+                        .put("content", "只返回 OK，不要解释。\n/no_think"),
+                ),
+            )
+            .put("temperature", 0)
+            .put("max_tokens", 64)
+            .apply {
+                if (usesQwenThinkingControl(model)) put("enable_thinking", false)
+            }
+    }
+
+    internal fun classifyChatContentProbe(
+        response: HttpResult,
+        modelAvailable: Boolean,
+    ): ConnectionResult {
+        response.failure?.let { failure ->
+            return ConnectionResult.Failure(failure.category, failure.detail)
+        }
+        if (response.code !in 200..299) {
+            return ConnectionResult.Failure(categoryFor(response.code), "probe_http_" + response.code)
+        }
+        val supported = runCatching {
+            val choices = JSONObject(response.body).getJSONArray("choices")
+            if (choices.length() != 1) return@runCatching false
+            val message = choices.getJSONObject(0).getJSONObject("message")
+            if (message.has("tool_calls") || message.has("function_call")) return@runCatching false
+            val content = message.opt("content")
+            content is String && content.trim() == "OK"
+        }.getOrDefault(false)
+        return if (supported) {
+            ConnectionResult.Success(modelAvailable = modelAvailable)
+        } else {
+            ConnectionResult.Failure(
+                FailureCategory.INVALID_RESPONSE,
+                "chat_text_response_unsupported",
+            )
+        }
+    }
+
     internal fun buildStreamingRequestBody(
         request: VlmRequest,
-        includeJsonSchema: Boolean,
     ): StreamingRequestBody {
         val json = buildRequestBody(
             request = request,
-            includeJsonSchema = includeJsonSchema,
             imageUrl = "data:${request.mimeType};base64,$IMAGE_DATA_PLACEHOLDER",
         ).toString()
         val placeholderIndex = json.indexOf(IMAGE_DATA_PLACEHOLDER)
@@ -238,66 +315,146 @@ class OpenAiVlmClient(
         )
     }
 
+    internal fun buildChatCompletionsRequestBody(request: VlmRequest): StreamingRequestBody {
+        val imageUrl = "data:${request.mimeType};base64,$IMAGE_DATA_PLACEHOLDER"
+        val prompt = systemPrompt.trimEnd() + "\n\n" + buildUserContext(request)
+        val messages = JSONArray().put(
+            JSONObject()
+                .put("role", "user")
+                .put(
+                    "content",
+                    JSONArray()
+                        .put(JSONObject().put("type", "text").put("text", prompt))
+                        .put(
+                            JSONObject()
+                                .put("type", "image_url")
+                                .put(
+                                    "image_url",
+                                    JSONObject()
+                                        .put("url", imageUrl)
+                                        .put("detail", "high"),
+                                ),
+                        ),
+                ),
+        )
+        val body = JSONObject()
+            .put("model", request.model)
+            .put("messages", messages)
+            .put("temperature", 0)
+            .put("max_tokens", 256)
+            .apply {
+                if (usesQwenThinkingControl(request.model)) put("enable_thinking", false)
+            }
+            .toString()
+        val placeholderIndex = body.indexOf(IMAGE_DATA_PLACEHOLDER)
+        check(placeholderIndex >= 0 && placeholderIndex == body.lastIndexOf(IMAGE_DATA_PLACEHOLDER))
+        return StreamingRequestBody(
+            prefix = body.substring(0, placeholderIndex).toByteArray(Charsets.UTF_8),
+            imageBytes = request.imageBytes,
+            suffix = body.substring(placeholderIndex + IMAGE_DATA_PLACEHOLDER.length)
+                .toByteArray(Charsets.UTF_8),
+        )
+    }
+
     private fun buildRequestBody(
         request: VlmRequest,
-        includeJsonSchema: Boolean,
         imageUrl: String,
     ): JSONObject {
-        val userContext = buildString {
-            append("请仅分析下面这一张图片，并严格遵守系统 Prompt。\n")
-            append("截图元数据（只能用于判断新鲜度）：\n")
-            append("- screenshot_captured_at: ")
-            append(request.screenshotCapturedAt ?: "null")
-            append("\n- device_timezone: ")
-            append(request.deviceTimezone)
-            append("\n- freshness_window_minutes: 30\n")
-            append("- notification_match: ")
-            append(request.notificationMatchJson ?: "null")
-        }
+        val userContext = buildUserContext(request)
         val content = JSONArray()
-            .put(JSONObject().put("type", "text").put("text", userContext))
+            .put(JSONObject().put("type", "input_text").put("text", userContext))
             .put(
                 JSONObject()
-                    .put("type", "image_url")
-                    .put(
-                        "image_url",
-                        JSONObject()
-                            .put("url", imageUrl)
-                            .put("detail", "high"),
-                    ),
+                    .put("type", "input_image")
+                    .put("image_url", imageUrl)
+                    .put("detail", "high"),
             )
-        val messages = JSONArray()
-            .put(JSONObject().put("role", "system").put("content", systemPrompt))
+        val input = JSONArray()
             .put(JSONObject().put("role", "user").put("content", content))
         val body = JSONObject()
             .put("model", request.model)
+            .put("instructions", systemPrompt)
             .put("temperature", 0)
-            .put("top_p", 1)
-            .put("max_tokens", 900)
-            .put("messages", messages)
-        if (includeJsonSchema) {
-            body.put(
-                "response_format",
-                JSONObject()
-                    .put("type", "json_schema")
-                    .put(
-                        "json_schema",
-                        JSONObject()
-                            .put("name", "ledger_v1")
-                            .put("strict", true)
-                            .put("schema", ledgerSchema()),
-                    ),
-            )
-        } else {
-            body.put("response_format", JSONObject().put("type", "json_object"))
-        }
+            .put("max_output_tokens", 256)
+            .put("input", input)
+        body.put(
+            "text",
+            JSONObject()
+                .put(
+                    "format",
+                    JSONObject()
+                        .put("type", "json_schema")
+                        .put("name", "ledger_capture_v1")
+                        .put("strict", true)
+                        .put("schema", captureSchema()),
+                ),
+        )
         return body
+    }
+
+    private fun buildUserContext(@Suppress("UNUSED_PARAMETER") request: VlmRequest): String =
+        "只提取 is_history、amount_minor 和 expense_target。不要读取时间。只返回 ledger.capture.v1 JSON。\n/no_think"
+
+    internal fun classifyChatCompletionsResponse(
+        response: HttpResult,
+        requestId: String,
+        configuredModel: String,
+        request: VlmRequest? = null,
+    ): VlmAnalyzeResult {
+        response.failure?.let { failure ->
+            return VlmAnalyzeResult.Failure(
+                category = failure.category,
+                retryable = failure == HttpFailure.NETWORK,
+                detail = failure.detail,
+            )
+        }
+        if (response.code !in 200..299) {
+            return VlmAnalyzeResult.Failure(
+                category = categoryFor(response.code),
+                retryable = response.code == 408 || response.code == 429 || response.code >= 500,
+                detail = "http_" + response.code,
+                retryAfterMillis = response.retryAfterMillis,
+            )
+        }
+        val content = runCatching {
+            val choices = JSONObject(response.body).optJSONArray("choices")
+                ?: error("missing_output")
+            if (choices.length() != 1) {
+                error(if (choices.length() > 1) "multiple_choices" else "missing_output")
+            }
+            val message = choices.optJSONObject(0)?.optJSONObject("message")
+                ?: error("missing_output")
+            val refusal = message.opt("refusal")
+            if (refusal is String && refusal.isNotBlank()) error("refusal")
+            val toolCalls = message.optJSONArray("tool_calls")
+            if (toolCalls != null) {
+                error(if (toolCalls.length() > 1) "multiple_tool_calls" else "unexpected_tool_call")
+            }
+            if (message.has("function_call")) error("unexpected_tool_call")
+            val content = message.opt("content")
+            if (content !is String || content.isBlank()) error("missing_output")
+            content
+        }.getOrElse { error ->
+            return VlmAnalyzeResult.Failure(
+                FailureCategory.INVALID_RESPONSE,
+                retryable = false,
+                detail = outerResponseFailureDetail(error.message),
+            )
+        }
+        return parseLedgerContent(
+            content = content,
+            requestId = requestId,
+            configuredModel = configuredModel,
+            request = request,
+            allowOuterWhitespace = true,
+        )
     }
 
     internal fun classifyAnalyzeResponse(
         response: HttpResult,
         requestId: String,
         configuredModel: String,
+        request: VlmRequest? = null,
     ): VlmAnalyzeResult {
         response.failure?.let { failure ->
             return VlmAnalyzeResult.Failure(
@@ -316,33 +473,65 @@ class OpenAiVlmClient(
         }
         val content = runCatching {
             val root = JSONObject(response.body)
-            val choice = root.optJSONArray("choices")?.optJSONObject(0)
-                ?: error("missing_choice")
-            val message = choice.optJSONObject("message") ?: error("missing_message")
-            if (message.has("refusal") && !message.isNull("refusal")) error("refusal")
-            if (message.has("tool_calls") && !message.isNull("tool_calls")) error("tool_call")
-            val raw = message.opt("content")
-            when (raw) {
-                is String -> raw
-                is JSONArray -> buildString {
-                    if (raw.length() == 0) error("empty_content")
-                    for (i in 0 until raw.length()) {
-                        val part = raw.optJSONObject(i) ?: error("non_text_content")
-                        if (part.opt("type") != "text") error("non_text_content")
-                        val text = part.opt("text")
-                        if (text !is String) error("non_text_content")
-                        append(text)
+            val status = root.opt("status")
+            if (status is String && status != "completed") error("response_not_completed")
+            val output = root.optJSONArray("output")
+            if (output == null) {
+                val direct = root.opt("output_text")
+                if (direct !is String || direct.isEmpty()) error("missing_output")
+                direct
+            } else {
+                buildString {
+                    if (output.length() == 0) error("empty_output")
+                    for (i in 0 until output.length()) {
+                        val item = output.optJSONObject(i) ?: error("invalid_output_item")
+                        when (item.opt("type")) {
+                            "message" -> {
+                                val parts = item.optJSONArray("content") ?: error("missing_content")
+                                if (parts.length() == 0) error("empty_content")
+                                for (j in 0 until parts.length()) {
+                                    val part = parts.optJSONObject(j) ?: error("invalid_content_part")
+                                    when (part.opt("type")) {
+                                        "output_text" -> {
+                                            val text = part.opt("text")
+                                            if (text !is String || text.isEmpty()) error("invalid_output_text")
+                                            append(text)
+                                        }
+                                        "refusal" -> error("refusal")
+                                        else -> error("non_text_content")
+                                    }
+                                }
+                            }
+                            "function_call" -> error("unexpected_tool_call")
+                            "refusal" -> error("refusal")
+                            else -> error("non_message_output")
+                        }
                     }
                 }
-                else -> error("invalid_content")
             }
-        }.getOrElse {
+        }.getOrElse { error ->
             return VlmAnalyzeResult.Failure(
                 FailureCategory.INVALID_RESPONSE,
                 retryable = false,
-                detail = "invalid_outer_response",
+                detail = outerResponseFailureDetail(error.message),
             )
         }
+        return parseLedgerContent(
+            content = content,
+            requestId = requestId,
+            configuredModel = configuredModel,
+            request = request,
+            allowOuterWhitespace = true,
+        )
+    }
+
+    private fun parseLedgerContent(
+        content: String,
+        requestId: String,
+        configuredModel: String,
+        request: VlmRequest?,
+        allowOuterWhitespace: Boolean,
+    ): VlmAnalyzeResult {
         if (content.toByteArray(Charsets.UTF_8).size > MAX_CONTENT_BYTES) {
             return VlmAnalyzeResult.Failure(
                 FailureCategory.INVALID_RESPONSE,
@@ -350,8 +539,9 @@ class OpenAiVlmClient(
                 detail = "response_too_large",
             )
         }
-        if (content.startsWith("\u0060\u0060\u0060") ||
-            content.trim() != content
+        val normalizedContent = if (allowOuterWhitespace) content.trim() else content
+        if (normalizedContent.startsWith("\u0060\u0060\u0060") ||
+            (!allowOuterWhitespace && normalizedContent.trim() != normalizedContent)
         ) {
             return VlmAnalyzeResult.Failure(
                 FailureCategory.INVALID_RESPONSE,
@@ -359,7 +549,15 @@ class OpenAiVlmClient(
                 detail = "response_not_strict_json",
             )
         }
-        return when (val parsed = LedgerV1Parser.parse(content)) {
+        val parsed = if (runCatching {
+                JSONObject(normalizedContent).optString("schema_version") == CAPTURE_SCHEMA_VERSION
+            }.getOrDefault(false)
+        ) {
+            parseCapture(normalizedContent, request)
+        } else {
+            LedgerV1Parser.parse(normalizedContent)
+        }
+        return when (parsed) {
             is ParseResult.Valid -> VlmAnalyzeResult.Success(
                 VlmResponse(
                     ledger = parsed.value,
@@ -370,9 +568,123 @@ class OpenAiVlmClient(
             is ParseResult.Invalid -> VlmAnalyzeResult.Failure(
                 FailureCategory.INVALID_RESPONSE,
                 retryable = false,
-                detail = parsed.reason,
+                detail = if (parsed.reason == "invalid_json") {
+                    classifyInvalidJsonShape(normalizedContent)
+                } else {
+                    parsed.reason
+                },
             )
         }
+    }
+
+    private fun parseCapture(content: String, request: VlmRequest?): ParseResult {
+        val context = request ?: return ParseResult.Invalid("missing_capture_context")
+        val root = runCatching { JSONObject(content) }.getOrElse {
+            return ParseResult.Invalid("invalid_json")
+        }
+        val keys = buildSet {
+            val iterator = root.keys()
+            while (iterator.hasNext()) add(iterator.next())
+        }
+        if (keys != CAPTURE_KEYS) return ParseResult.Invalid("root_keys")
+        if (root.optString("schema_version") != CAPTURE_SCHEMA_VERSION) {
+            return ParseResult.Invalid("schema_version")
+        }
+        val isHistory = root.opt("is_history") as? Boolean
+            ?: return ParseResult.Invalid("is_history")
+        val amount = when (val raw = root.opt("amount_minor")) {
+            JSONObject.NULL -> null
+            is Number -> raw.toString().takeIf { Regex("[1-9][0-9]*").matches(it) }
+                ?.toLongOrNull()
+                ?: return ParseResult.Invalid("amount_minor")
+            else -> return ParseResult.Invalid("amount_minor")
+        }
+        val expenseTarget = when (val raw = root.opt("expense_target")) {
+            JSONObject.NULL -> null
+            is String -> raw.takeIf {
+                it == it.trim() && it.length <= 120 && it.none(Char::isISOControl)
+            } ?: return ParseResult.Invalid("expense_target")
+            else -> return ParseResult.Invalid("expense_target")
+        }
+        val capturedAt = context.screenshotCapturedAt?.let {
+            runCatching { OffsetDateTime.parse(it) }.getOrNull()
+        }
+        val platform = platformForPackage(context.sourcePackage)
+        val canBook = !isHistory && amount != null && capturedAt != null && platform != Platform.UNKNOWN
+        val reasonCode = when {
+            isHistory -> "STALE_TRANSACTION"
+            amount == null -> "MISSING_AMOUNT"
+            capturedAt == null -> "MISSING_TIME"
+            platform == Platform.UNKNOWN -> "UNSUPPORTED_PLATFORM"
+            else -> "PAYMENT_PAGE_CONFIRMED"
+        }
+        val positive = if (canBook) {
+            buildList {
+                add("PAYMENT_SUCCESS")
+                add("PLATFORM_MARKER")
+                add("UNIQUE_AMOUNT")
+                if (expenseTarget != null) add("MERCHANT_MARKER")
+                add("FRESH_TIME")
+            }
+        } else {
+            emptyList()
+        }
+        return ParseResult.Valid(
+            LedgerV1(
+                decision = when {
+                    isHistory -> Decision.REJECT
+                    canBook -> Decision.AUTO_BOOK
+                    else -> Decision.NEEDS_CONFIRMATION
+                },
+                isPaymentScreenshot = !isHistory,
+                platform = platform,
+                direction = Direction.EXPENSE,
+                amountMinor = amount,
+                currency = amount?.let { "CNY" },
+                merchant = expenseTarget,
+                counterparty = null,
+                occurredAt = capturedAt,
+                timeSource = capturedAt?.let { TimeSource.SCREENSHOT_ESTIMATED },
+                externalId = null,
+                suggestedTag = null,
+                confidence = if (canBook) 0.99 else 0.0,
+                evidence = Evidence(
+                    positiveFeatures = positive,
+                    negativeFeatures = if (isHistory) listOf("HISTORY_DETAIL") else emptyList(),
+                    freshness = when {
+                        isHistory -> Freshness.STALE
+                        capturedAt != null -> Freshness.VALID
+                        else -> Freshness.UNKNOWN
+                    },
+                    reasonCode = reasonCode,
+                ),
+            ),
+        )
+    }
+
+    private fun platformForPackage(sourcePackage: String?): Platform = when (sourcePackage?.lowercase()) {
+        "com.tencent.mm" -> Platform.WECHAT
+        "com.eg.android.alipaygphone" -> Platform.ALIPAY
+        null -> Platform.UNKNOWN
+        else -> Platform.OTHER
+    }
+
+    internal fun classifyInvalidJsonShape(content: String): String = when {
+        content.startsWith('"') && content.endsWith('"') -> "invalid_json_quoted"
+        !content.startsWith('{') -> "invalid_json_non_object"
+        !content.endsWith('}') -> "invalid_json_truncated"
+        else -> "invalid_json_syntax"
+    }
+
+    private fun outerResponseFailureDetail(reason: String?): String = when (reason) {
+        "refusal" -> "response_refusal"
+        "unexpected_tool_call" -> "unexpected_tool_call"
+        "multiple_tool_calls", "multiple_choices" -> "multiple_tool_calls"
+        "non_message_output" -> "unsupported_output_item"
+        "non_text_content" -> "unsupported_content_part"
+        "response_not_completed" -> "response_not_completed"
+        "empty_output", "empty_content", "missing_output", "missing_content" -> "empty_response_output"
+        else -> "invalid_outer_response"
     }
 
     private fun execute(
@@ -434,7 +746,10 @@ class OpenAiVlmClient(
         }
     }
 
-    private fun normalizeEndpoint(baseUrl: String): String {
+    internal fun normalizeEndpoint(
+        baseUrl: String,
+        protocol: VlmApiProtocol = VlmApiProtocol.RESPONSES,
+    ): String {
         val input = baseUrl.trim().trimEnd('/')
         require(input.length <= MAX_BASE_URL_CHARS)
         val uri = URI(input)
@@ -443,7 +758,11 @@ class OpenAiVlmClient(
         val path = uri.path.orEmpty().trimEnd('/')
         require(path.isEmpty() || path == "/v1" || path.endsWith("/v1"))
         val apiPath = if (path.isEmpty()) "/v1" else path
-        return URI("https", null, uri.host, uri.port, "$apiPath/chat/completions", null, null).toString()
+        val resource = when (protocol) {
+            VlmApiProtocol.RESPONSES -> "responses"
+            VlmApiProtocol.CHAT_COMPLETIONS -> "chat/completions"
+        }
+        return URI("https", null, uri.host, uri.port, "$apiPath/$resource", null, null).toString()
     }
 
     internal fun readBounded(
@@ -512,20 +831,6 @@ class OpenAiVlmClient(
         }.getOrNull()
     }
 
-    internal fun explicitlyRejectsStructuredOutput(body: String): Boolean {
-        val normalized = body.lowercase()
-        val namesStructuredOutput = "response_format" in normalized || "json_schema" in normalized
-        val explicitlyUnsupported = listOf(
-            "not supported",
-            "does not support",
-            "unsupported",
-            "unknown parameter",
-            "unrecognized parameter",
-            "not implemented",
-        ).any { it in normalized }
-        return namesStructuredOutput && explicitlyUnsupported
-    }
-
     private fun categoryFor(code: Int): FailureCategory = when {
         code == 401 || code == 403 -> FailureCategory.AUTHENTICATION
         code == 413 || code == 415 -> FailureCategory.UNSUPPORTED_IMAGE
@@ -536,36 +841,16 @@ class OpenAiVlmClient(
         else -> FailureCategory.INVALID_RESPONSE
     }
 
-    internal fun ledgerSchema(): JSONObject = JSONObject(
+    internal fun captureSchema(): JSONObject = JSONObject(
         """
         {
           "type":"object","additionalProperties":false,
-          "required":["schema_version","decision","is_payment_screenshot","platform","direction","amount_minor","currency","merchant","counterparty","occurred_at","time_source","external_id","suggested_tag","confidence","evidence"],
+          "required":["schema_version","is_history","amount_minor","expense_target"],
           "properties":{
-            "schema_version":{"const":"ledger.v1"},
-            "decision":{"enum":["AUTO_BOOK","NEEDS_CONFIRMATION","REJECT"]},
-            "is_payment_screenshot":{"type":"boolean"},
-            "platform":{"enum":["WECHAT","ALIPAY","OTHER","UNKNOWN"]},
-            "direction":{"enum":["EXPENSE","INCOME","REFUND","UNKNOWN"]},
+            "schema_version":{"const":"ledger.capture.v1"},
+            "is_history":{"type":"boolean"},
             "amount_minor":{"anyOf":[{"type":"integer","minimum":1},{"type":"null"}]},
-            "currency":{"anyOf":[{"type":"string","pattern":"^[A-Z]{3}$"},{"type":"null"}]},
-            "merchant":{"anyOf":[{"type":"string","maxLength":120},{"type":"null"}]},
-            "counterparty":{"anyOf":[{"type":"string","maxLength":120},{"type":"null"}]},
-            "occurred_at":{"anyOf":[{"type":"string","format":"date-time","maxLength":40},{"type":"null"}]},
-            "time_source":{"anyOf":[{"enum":["PAGE_EXACT","NOTIFICATION_MATCHED","SCREENSHOT_ESTIMATED"]},{"type":"null"}]},
-            "external_id":{"anyOf":[{"type":"string","maxLength":128},{"type":"null"}]},
-            "suggested_tag":{"anyOf":[{"type":"string","maxLength":40},{"type":"null"}]},
-            "confidence":{"type":"number","minimum":0,"maximum":1},
-            "evidence":{
-              "type":"object","additionalProperties":false,
-              "required":["positive_features","negative_features","freshness","reason_code"],
-              "properties":{
-                "positive_features":{"type":"array","uniqueItems":true,"maxItems":12,"items":{"enum":["PAYMENT_SUCCESS","RECEIPT_SUCCESS","REFUND_SUCCESS","INCOME_RECEIVED","PLATFORM_MARKER","UNIQUE_AMOUNT","MERCHANT_MARKER","PAGE_EXACT_TIME","NOTIFICATION_MATCH","FRESH_TIME"]}},
-                "negative_features":{"type":"array","uniqueItems":true,"maxItems":12,"items":{"enum":["CHAT_THREAD","BILL_LIST","HISTORY_DETAIL","SHARE_POSTER","IMAGE_PREVIEW","SEARCH_RESULT","MULTIPLE_TRANSACTIONS","MULTIPLE_AMOUNTS","PENDING_OR_FAILED","NO_TRANSACTION_STATUS","STALE_TIME","CONFLICTING_FIELDS","UNREADABLE","NON_PAYMENT"]}},
-                "freshness":{"enum":["VALID","STALE","UNKNOWN"]},
-                "reason_code":{"enum":["PAYMENT_PAGE_CONFIRMED","REFUND_PAGE_CONFIRMED","INCOME_PAGE_CONFIRMED","NOT_PAYMENT_PAGE","MULTIPLE_AMOUNTS","MULTIPLE_TRANSACTIONS","MISSING_AMOUNT","MISSING_TIME","STALE_TRANSACTION","STRONG_NEGATIVE_FEATURE","CONFLICTING_FIELDS","LOW_CONFIDENCE","UNSUPPORTED_PLATFORM","PROCESSING_OR_FAILED","UNREADABLE_IMAGE","NOTIFICATION_MATCH","INVALID_CONTEXT"]}
-              }
-            }
+            "expense_target":{"anyOf":[{"type":"string","maxLength":120},{"type":"null"}]}
           }
         }
         """.trimIndent(),
@@ -576,18 +861,18 @@ class OpenAiVlmClient(
         const val MAX_CONTENT_BYTES = 64 * 1024
         const val MAX_HTTP_RESPONSE_BYTES = 256 * 1024
         const val MAX_ERROR_BODY_BYTES = 64 * 1024
-        const val HTTP_BAD_REQUEST = 400
         const val HTTP_NETWORK_ERROR = -1
         const val MAX_BASE_URL_CHARS = 2_048
         const val MAX_RETRY_AFTER_MILLIS = 30_000L
+        const val CAPTURE_SCHEMA_VERSION = "ledger.capture.v1"
+        val CAPTURE_KEYS = setOf("schema_version", "is_history", "amount_minor", "expense_target")
+
+        fun usesQwenThinkingControl(model: String): Boolean =
+            model.substringAfterLast('/').startsWith("Qwen3", ignoreCase = true)
         const val IMAGE_DATA_PLACEHOLDER = "LEDGER_IMAGE_DATA_7F3A4B2D9C8E"
         const val DEFAULT_SYSTEM_PROMPT =
-            "你是 Ledger VLM。严格按照 ledger.v1 只输出一个 JSON 对象；" +
-                "未知字段使用 null 或 UNKNOWN，禁止 Markdown、解释、完整 OCR 文本和猜测。" +
-                "必须判断支付成功/退款/收入页面，排除聊天、账单列表、历史详情、分享海报和图片预览，" +
-                "并返回 decision、is_payment_screenshot、platform、direction、amount_minor、currency、" +
-                "merchant、counterparty、occurred_at、time_source、external_id、suggested_tag、confidence、evidence。" +
-                "只有成功状态、金额唯一、时间新鲜、无负特征且 confidence>=0.90 才可建议 AUTO_BOOK。"
+            "你是截图记账字段提取器。只判断页面是否明确含历史记录字样，并提取唯一金额和支出对象；" +
+                "不要读取或判断时间。只输出 ledger.capture.v1 JSON，不得输出解释、推理或 Markdown。"
     }
 }
 

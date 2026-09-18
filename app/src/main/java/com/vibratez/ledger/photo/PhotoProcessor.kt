@@ -4,7 +4,6 @@ import com.vibratez.ledger.ledger.LedgerDecision
 import com.vibratez.ledger.ledger.LedgerDecisionEngine
 import com.vibratez.ledger.ledger.LedgerStore
 import com.vibratez.ledger.ledger.PhotoEvidence
-import com.vibratez.ledger.security.AppSettings
 import com.vibratez.ledger.security.SecureSettings
 import com.vibratez.ledger.vlm.VlmAnalyzeResult
 import com.vibratez.ledger.vlm.VlmRequest
@@ -38,6 +37,7 @@ sealed interface PhotoProcessingResult {
         override val candidate: ScreenshotCandidate,
         val reason: String,
         val retryable: Boolean,
+        val retryAfterMillis: Long? = null,
     ) : PhotoProcessingResult
 }
 
@@ -78,9 +78,26 @@ class PhotoProcessor(
     }
 
     private suspend fun processOne(
-        candidate: ScreenshotCandidate,
+        inputCandidate: ScreenshotCandidate,
     ): PhotoProcessingResult {
-        if (!settings.load().cloudEnabled) {
+        val candidate = inputCandidate.copy(
+            capturedAtMillis = resolvedScreenshotCapturedAtMillis(
+                displayName = inputCandidate.displayName,
+                mediaCapturedAtMillis = inputCandidate.capturedAtMillis,
+                addedAtMillis = inputCandidate.addedAtMillis,
+                fallbackMillis = System.currentTimeMillis(),
+            ),
+        )
+        val sourcePackage = screenshotSourcePackage(candidate.displayName)
+        val initialSettings = settings.load()
+        if (!PackageFilter.allows(sourcePackage, initialSettings)) {
+            return PhotoProcessingResult.Failed(
+                candidate,
+                "package_filtered",
+                retryable = false,
+            )
+        }
+        if (!initialSettings.cloudEnabled) {
             return PhotoProcessingResult.Failed(candidate, "cloud_disabled", retryable = false)
         }
         var bytes: ByteArray? = null
@@ -126,6 +143,7 @@ class PhotoProcessor(
                             imageBytes = bytes!!,
                             screenshotCapturedAt = candidate.capturedAtMillis?.let(::toRfc3339),
                             deviceTimezone = ZoneId.systemDefault().id,
+                            sourcePackage = sourcePackage,
                         )
                         var attempt = 0
                         var response = client.analyze(
@@ -133,10 +151,7 @@ class PhotoProcessor(
                             apiKey = apiKey,
                             request = request,
                             timeoutSeconds = appSettings.timeoutSeconds,
-                            allowAdditionalUpload = additionalUploadAllowed(
-                                expectedSettings = appSettings,
-                                expectedApiKey = apiKey,
-                            ),
+                            protocol = appSettings.protocol,
                         )
                         while (response is VlmAnalyzeResult.Failure &&
                             response.retryable &&
@@ -169,10 +184,7 @@ class PhotoProcessor(
                                 apiKey = retryApiKey,
                                 request = request,
                                 timeoutSeconds = retrySettings.timeoutSeconds,
-                                allowAdditionalUpload = additionalUploadAllowed(
-                                    expectedSettings = retrySettings,
-                                    expectedApiKey = retryApiKey,
-                                ),
+                                protocol = retrySettings.protocol,
                             )
                         }
                         when (response) {
@@ -183,6 +195,7 @@ class PhotoProcessor(
                                         uri = candidate.uri.toString(),
                                         sha256 = hash,
                                         screenshotCapturedAtMillis = candidate.capturedAtMillis,
+                                        screenshotSourcePackage = sourcePackage,
                                     ),
                                 )
                                 val saveState = if (decision is LedgerDecision.AutoBook) {
@@ -212,7 +225,7 @@ class PhotoProcessor(
                                         sha256 = hash,
                                         decision = LedgerDecision.NeedsConfirmation(
                                             ledger = emptyManualReviewLedger(),
-                                            reason = "INVALID_RESPONSE",
+                                            reason = "INVALID_RESPONSE:${response.detail}",
                                         ),
                                         vlmModel = request.model,
                                     )
@@ -221,6 +234,7 @@ class PhotoProcessor(
                                         candidate,
                                         response.category.name.lowercase(),
                                         response.retryable,
+                                        response.retryAfterMillis,
                                     )
                                 }
                             }
@@ -235,18 +249,6 @@ class PhotoProcessor(
 
     private fun toRfc3339(millis: Long): String =
         Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).toOffsetDateTime().toString()
-
-    private fun additionalUploadAllowed(
-        expectedSettings: AppSettings,
-        expectedApiKey: String,
-    ): () -> Boolean = {
-        val current = settings.load()
-        current.cloudEnabled &&
-            current.baseUrl == expectedSettings.baseUrl &&
-            current.model == expectedSettings.model &&
-            current.timeoutSeconds == expectedSettings.timeoutSeconds &&
-            settings.readApiKey() == expectedApiKey
-    }
 
     private suspend fun persistAutoBook(
         decision: LedgerDecision.AutoBook,

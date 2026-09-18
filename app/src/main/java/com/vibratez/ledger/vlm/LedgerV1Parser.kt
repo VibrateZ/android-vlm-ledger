@@ -253,6 +253,7 @@ object LedgerV1Parser {
             val timeEvidenceMatchesSource = when (value.timeSource) {
                 TimeSource.PAGE_EXACT -> "PAGE_EXACT_TIME" in value.evidence.positiveFeatures
                 TimeSource.NOTIFICATION_MATCHED -> "NOTIFICATION_MATCH" in value.evidence.positiveFeatures
+                TimeSource.SCREENSHOT_ESTIMATED -> isImmediateNativePaymentSuccess(value, positive)
                 else -> false
             }
             val presentSuccessFeatures = positive.filter { it in transactionSuccessFeatures }
@@ -276,7 +277,6 @@ object LedgerV1Parser {
                 value.currency != null &&
                 value.occurredAt != null &&
                 value.timeSource != null &&
-                value.timeSource != TimeSource.SCREENSHOT_ESTIMATED &&
                 value.confidence >= 0.90 &&
                 value.evidence.freshness == Freshness.VALID &&
                 negative.isEmpty() &&
@@ -288,12 +288,15 @@ object LedgerV1Parser {
                 reasonMatchesDirection
             if (!required) return ParseResult.Invalid("auto_book_invariants")
         }
-        if (value.timeSource == TimeSource.SCREENSHOT_ESTIMATED &&
-            (value.decision != Decision.NEEDS_CONFIRMATION ||
-                value.evidence.freshness == Freshness.VALID ||
-                value.evidence.reasonCode != "MISSING_TIME")
-        ) {
-            return ParseResult.Invalid("estimated_time_invariants")
+        if (value.timeSource == TimeSource.SCREENSHOT_ESTIMATED) {
+            val immediateNativePaymentSuccess = value.decision == Decision.AUTO_BOOK &&
+                isImmediateNativePaymentSuccess(value, positive)
+            val conservativeConfirmation = value.decision == Decision.NEEDS_CONFIRMATION &&
+                value.evidence.freshness != Freshness.VALID &&
+                value.evidence.reasonCode == "MISSING_TIME"
+            if (!immediateNativePaymentSuccess && !conservativeConfirmation) {
+                return ParseResult.Invalid("estimated_time_invariants")
+            }
         }
         when (value.evidence.reasonCode) {
             "MISSING_TIME" -> if (
@@ -320,6 +323,24 @@ object LedgerV1Parser {
         }
         return ParseResult.Valid(value)
     }
+
+    private fun isImmediateNativePaymentSuccess(value: LedgerV1, positive: List<String>): Boolean =
+        value.platform != Platform.UNKNOWN &&
+            value.direction in setOf(Direction.EXPENSE, Direction.INCOME, Direction.REFUND) &&
+            (value.merchant != null || value.counterparty != null) &&
+            value.evidence.freshness == Freshness.VALID &&
+            value.evidence.reasonCode in setOf(
+                "PAYMENT_PAGE_CONFIRMED",
+                "INCOME_PAGE_CONFIRMED",
+                "REFUND_PAGE_CONFIRMED",
+            ) &&
+            setOf(
+                "PLATFORM_MARKER",
+                "UNIQUE_AMOUNT",
+                "MERCHANT_MARKER",
+                "FRESH_TIME",
+            ).all { it in positive } &&
+            positive.any { it in transactionSuccessFeatures }
 
     private data class NullableField<T>(val valid: Boolean, val value: T?)
 

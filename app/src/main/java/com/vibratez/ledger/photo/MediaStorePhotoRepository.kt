@@ -10,6 +10,9 @@ import android.os.Looper
 import android.provider.MediaStore
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
+import java.time.LocalDateTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 data class ScreenshotCandidate(
     val uri: Uri,
@@ -19,7 +22,39 @@ data class ScreenshotCandidate(
     val capturedAtMillis: Long?,
     val width: Int?,
     val height: Int?,
+    val addedAtMillis: Long? = null,
 )
+
+internal fun screenshotSourcePackage(displayName: String): String? =
+    HYPEROS_SCREENSHOT.matchEntire(displayName)?.groupValues?.getOrNull(2)?.lowercase()
+
+internal fun resolvedScreenshotCapturedAtMillis(
+    displayName: String,
+    mediaCapturedAtMillis: Long?,
+    addedAtMillis: Long?,
+    fallbackMillis: Long,
+): Long = screenshotTimeFromFileName(displayName)
+    ?: mediaCapturedAtMillis?.takeIf { it > 0L }
+    ?: addedAtMillis?.takeIf { it > 0L }
+    ?: fallbackMillis
+
+internal fun screenshotTimeFromFileName(displayName: String): Long? {
+    val timestamp = HYPEROS_SCREENSHOT.matchEntire(displayName)?.groupValues?.getOrNull(1)
+        ?: return null
+    return runCatching {
+        LocalDateTime.parse(timestamp, HYPEROS_TIME_FORMAT)
+            .atZone(ZoneId.systemDefault())
+            .toInstant()
+            .toEpochMilli()
+    }.getOrNull()
+}
+
+internal fun verifiedPaymentSourcePackage(displayName: String): String? =
+    when (screenshotSourcePackage(displayName)) {
+        WECHAT_PACKAGE.lowercase() -> WECHAT_PACKAGE
+        ALIPAY_PACKAGE.lowercase() -> ALIPAY_PACKAGE
+        else -> null
+    }
 
 sealed interface PhotoReadResult {
     data class Success(val bytes: ByteArray) : PhotoReadResult
@@ -52,6 +87,16 @@ class MediaStorePhotoRepository(context: Context) {
         windowMinutes: Long = 30,
         limit: Int = 20,
     ): List<ScreenshotCandidate> {
+        return screenshotsSince(
+            sinceMillis = (nowMillis - windowMinutes * 60_000L).coerceAtLeast(0L),
+            limit = limit,
+        )
+    }
+
+    fun screenshotsSince(
+        sinceMillis: Long,
+        limit: Int = 1_000,
+    ): List<ScreenshotCandidate> {
         val projection = buildList {
             add(MediaStore.Images.Media._ID)
             add(MediaStore.Images.Media.DISPLAY_NAME)
@@ -66,8 +111,7 @@ class MediaStorePhotoRepository(context: Context) {
                 add(MediaStore.Images.Media.IS_PENDING)
             }
         }.toTypedArray()
-        val minimumAddedSeconds =
-            (nowMillis - windowMinutes * 60_000L).coerceAtLeast(0L) / 1_000L
+        val minimumAddedSeconds = sinceMillis.coerceAtLeast(0L) / 1_000L
         val selection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             "${MediaStore.Images.Media.IS_PENDING} = 0 AND " +
                 "${MediaStore.Images.Media.DATE_ADDED} >= ?"
@@ -80,7 +124,7 @@ class MediaStorePhotoRepository(context: Context) {
             projection,
             selection,
             arrayOf(minimumAddedSeconds.toString()),
-            "${MediaStore.Images.Media.DATE_ADDED} DESC",
+            "${MediaStore.Images.Media.DATE_ADDED} ASC",
         )?.use { cursor ->
             val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
             val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
@@ -115,9 +159,12 @@ class MediaStorePhotoRepository(context: Context) {
                     displayName = name,
                     mimeType = mime,
                     sizeBytes = cursor.getLong(sizeColumn).coerceAtLeast(0L),
-                    capturedAtMillis = taken ?: added,
+                    capturedAtMillis = resolvedScreenshotCapturedAtMillis(
+                        name, taken, added, System.currentTimeMillis(),
+                    ),
                     width = cursor.getInt(widthColumn).takeIf { it > 0 },
                     height = cursor.getInt(heightColumn).takeIf { it > 0 },
+                    addedAtMillis = added,
                 )
                 if (validateMetadata(candidate) == null) result += candidate
             }
@@ -183,9 +230,12 @@ class MediaStorePhotoRepository(context: Context) {
                     mimeType = mime,
                     sizeBytes = sizeIndex.takeIf { it >= 0 }?.let(cursor::getLong)
                         ?.coerceAtLeast(0L) ?: 0L,
-                    capturedAtMillis = taken ?: added,
+                    capturedAtMillis = resolvedScreenshotCapturedAtMillis(
+                        name, taken, added, System.currentTimeMillis(),
+                    ),
                     width = widthIndex.takeIf { it >= 0 }?.let(cursor::getInt)?.takeIf { it > 0 },
                     height = heightIndex.takeIf { it >= 0 }?.let(cursor::getInt)?.takeIf { it > 0 },
+                    addedAtMillis = added,
                 )
             }
         } catch (_: Exception) {
@@ -238,3 +288,14 @@ class MediaStorePhotoRepository(context: Context) {
         )
     }
 }
+
+internal const val WECHAT_PACKAGE = "com.tencent.mm"
+internal const val ALIPAY_PACKAGE = "com.eg.android.AlipayGphone"
+
+private val HYPEROS_SCREENSHOT = Regex(
+    pattern = "^Screenshot_(\\d{4}-\\d{2}-\\d{2}-\\d{2}-\\d{2}-\\d{2}-\\d{3})_" +
+        "([A-Za-z][A-Za-z0-9_.]*)\\.(?:jpe?g|png|webp|heic|heif)$",
+    option = RegexOption.IGNORE_CASE,
+)
+
+private val HYPEROS_TIME_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd-HH-mm-ss-SSS")
