@@ -73,6 +73,7 @@ class LedgerStore(
     ): TransactionRecord? =
         withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
+            if (isCrossSourceDuplicate(ledger, localDecision)) return@withContext null
             val transactionFingerprint = transactionFingerprint(ledger, itemName)
             val record = TransactionRecord(
                 id = UUID.randomUUID().toString(),
@@ -153,6 +154,75 @@ class LedgerStore(
         dao.all().map(::toRecord)
     }
 
+    suspend fun reconcileCrossSourceDuplicates(): Int = withContext(Dispatchers.IO) {
+        val records = dao.all().map(::toRecord)
+        val statements = records.filter { it.localDecision.equals("STATEMENT_IMPORT", true) }
+        val autoBooks = records.filter { it.localDecision.equals("AUTO_BOOK", true) }
+        var removed = 0
+        autoBooks.forEach { auto ->
+            val ledger = auto.toLedgerForMatching() ?: return@forEach
+            if (isCrossSourceDuplicateAgainst(ledger, auto.localDecision, statements)) {
+                if (dao.deleteById(auto.id) > 0) {
+                    audit("TRANSACTION", auto.id, "DEDUPLICATED", "AUTO_BOOK_MATCHED_STATEMENT")
+                    removed++
+                }
+            }
+        }
+        removed
+    }
+
+    private suspend fun isCrossSourceDuplicate(ledger: LedgerV1, localDecision: String): Boolean {
+        val source = localDecision.uppercase()
+        if (source != "AUTO_BOOK" && source != "STATEMENT_IMPORT") return false
+        val amount = ledger.amountMinor ?: return false
+        val currency = ledger.currency?.uppercase() ?: return false
+        val occurredAt = ledger.occurredAt?.toInstant() ?: return false
+        val counterpart = normalizeCounterparty(ledger.merchant ?: ledger.counterparty)
+            ?: return false
+        return isCrossSourceDuplicateAgainst(ledger, localDecision, dao.all().map(::toRecord))
+    }
+
+    private fun isCrossSourceDuplicateAgainst(ledger: LedgerV1, localDecision: String, existingRecords: List<TransactionRecord>): Boolean {
+        val source = localDecision.uppercase()
+        val amount = ledger.amountMinor ?: return false
+        val currency = ledger.currency?.uppercase() ?: return false
+        val occurredAt = ledger.occurredAt?.toInstant() ?: return false
+        val counterpart = normalizeCounterparty(ledger.merchant ?: ledger.counterparty) ?: return false
+        return existingRecords.any { existing ->
+            val opposite = if (source == "AUTO_BOOK") "STATEMENT_IMPORT" else "AUTO_BOOK"
+            existing.localDecision.uppercase() == opposite &&
+                existing.direction == ledger.direction.name &&
+                existing.amountMinor == amount &&
+                existing.currency?.uppercase() == currency &&
+                existing.occurredAt?.let { runCatching { java.time.OffsetDateTime.parse(it).toInstant() }.getOrNull() }
+                    ?.let { kotlin.math.abs(java.time.Duration.between(it, occurredAt).toMinutes()) <= CROSS_SOURCE_WINDOW_MINUTES } == true &&
+                namesOverlap(counterpart, normalizeCounterparty(existing.merchant ?: existing.counterparty))
+        }
+    }
+
+    private fun TransactionRecord.toLedgerForMatching(): LedgerV1? = runCatching {
+        LedgerV1(
+            decision = com.vibratez.ledger.vlm.Decision.AUTO_BOOK,
+            isPaymentScreenshot = true,
+            platform = com.vibratez.ledger.vlm.Platform.valueOf(platform),
+            direction = com.vibratez.ledger.vlm.Direction.valueOf(direction),
+            amountMinor = amountMinor, currency = currency, merchant = merchant, counterparty = counterparty,
+            occurredAt = occurredAt?.let(java.time.OffsetDateTime::parse), timeSource = null, externalId = externalId,
+            suggestedTag = suggestedTag, confidence = confidence, evidence = com.vibratez.ledger.vlm.Evidence(
+                positiveFeatures = emptyList(), negativeFeatures = emptyList(),
+                freshness = com.vibratez.ledger.vlm.Freshness.UNKNOWN, reasonCode = reasonCode,
+            ),
+        )
+    }.getOrNull()
+
+    private fun namesOverlap(left: String, right: String?): Boolean =
+        right != null && (left == right || left.contains(right) || right.contains(left))
+
+    private fun normalizeCounterparty(value: String?): String? =
+        value?.lowercase()?.replace(Regex("\\([^)]*\\)|（[^）]*）"), "")
+            ?.replace(Regex("[^\\p{L}\\p{N}]"), "")
+            ?.takeIf { it.length >= 2 }
+
     suspend fun withoutTime(): List<TransactionRecord> = withContext(Dispatchers.IO) {
         dao.withoutTime().map(::toRecord)
     }
@@ -207,6 +277,8 @@ class LedgerStore(
     }
 
     companion object {
+        private const val CROSS_SOURCE_WINDOW_MINUTES = 10L
+
         internal fun transactionFingerprint(ledger: LedgerV1, itemName: String? = null): String? {
             val platform = ledger.platform.name
             val direction = ledger.direction.name

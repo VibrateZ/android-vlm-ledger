@@ -113,6 +113,8 @@ class PendingReviewStore(
 
     suspend fun dismiss(id: String) = dao.updateStatus(id, STATUS_DISMISSED)
 
+    suspend fun delete(id: String): Boolean = dao.deleteById(id) > 0
+
     suspend fun close() = database.close()
 
     private fun toModel(entity: PendingReviewEntity) = PendingReview(

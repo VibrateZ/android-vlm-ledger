@@ -317,6 +317,7 @@ private fun LedgerApp() {
     var pendingReviews by remember { mutableStateOf<List<PendingReview>>(emptyList()) }
     var hasPhotoPermission by remember { mutableStateOf(hasPhotoReadPermission(context)) }
     var pendingLegacyDelete by remember { mutableStateOf<Uri?>(null) }
+    var pendingLegacyDeleteSourceUri by remember { mutableStateOf<String?>(null) }
     var mediaStoreChanged by remember { mutableStateOf(false) }
     var bookedPhotoPrompts by remember {
         mutableStateOf<List<BookedPhotoPrompt>>(emptyList())
@@ -383,14 +384,16 @@ private fun LedgerApp() {
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         val uri = pendingLegacyDelete
+        val sourceUri = pendingLegacyDeleteSourceUri
         pendingLegacyDelete = null
-        if (!granted || uri == null) {
+        pendingLegacyDeleteSourceUri = null
+        if (!granted || uri == null || sourceUri == null) {
             deleteMessage = "未获得删除权限，已保留截图"
         } else {
             scope.launch {
                 val deleted = deleteDirectly(context, uri)
                 screenshotQueueStore.markDeleteState(
-                    listOf(uri.toString()),
+                    listOf(sourceUri),
                     if (deleted) ScreenshotQueueStore.DELETE_DELETED else ScreenshotQueueStore.DELETE_PENDING,
                 )
                 queueSummary = screenshotQueueStore.summary()
@@ -497,12 +500,13 @@ private fun LedgerApp() {
         )
     }
     val requestPhotoDelete: (Uri) -> Unit = delete@ { uri ->
+        val originalUri = uri
         val deleteUri = resolveMediaStoreDeleteUri(context, uri)
         if (deleteUri == null) {
             deleteMessage = "所选文件不属于 MediaStore，请在系统文件应用中删除"
             return@delete
         }
-        pendingDeleteUris = listOf(deleteUri.toString())
+        pendingDeleteUris = listOf(originalUri.toString())
         when {
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> {
                 runCatching {
@@ -523,7 +527,7 @@ private fun LedgerApp() {
                     when (val result = deleteOnAndroid10(context, deleteUri)) {
                         DeleteAttempt.Deleted -> {
                             screenshotQueueStore.markDeleteState(
-                                listOf(deleteUri.toString()),
+                                listOf(originalUri.toString()),
                                 ScreenshotQueueStore.DELETE_DELETED,
                             )
                             queueSummary = screenshotQueueStore.summary()
@@ -548,7 +552,7 @@ private fun LedgerApp() {
                 scope.launch {
                     val deleted = deleteDirectly(context, deleteUri)
                     screenshotQueueStore.markDeleteState(
-                        listOf(deleteUri.toString()),
+                        listOf(originalUri.toString()),
                         if (deleted) ScreenshotQueueStore.DELETE_DELETED else ScreenshotQueueStore.DELETE_PENDING,
                     )
                     queueSummary = screenshotQueueStore.summary()
@@ -562,6 +566,7 @@ private fun LedgerApp() {
             }
             else -> {
                 pendingLegacyDelete = deleteUri
+                pendingLegacyDeleteSourceUri = originalUri.toString()
                 legacyDeletePermissionLauncher.launch(
                     Manifest.permission.WRITE_EXTERNAL_STORAGE,
                 )
@@ -1146,8 +1151,16 @@ private fun LedgerApp() {
                                         if (jobs.isEmpty()) {
                                             snackbar.showSnackbar("没有待删除截图")
                                         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                                            val uris = jobs.map { Uri.parse(it.sourceUri) }
-                                            pendingDeleteUris = jobs.map { it.sourceUri }
+                                            val resolved = jobs.mapNotNull { job ->
+                                                resolveMediaStoreDeleteUri(context, Uri.parse(job.sourceUri))
+                                                    ?.let { deleteUri -> job.sourceUri to deleteUri }
+                                            }
+                                            if (resolved.isEmpty()) {
+                                                snackbar.showSnackbar("待删除记录不是可删除的图库媒体")
+                                                return@launch
+                                            }
+                                            val uris = resolved.map { it.second }
+                                            pendingDeleteUris = resolved.map { it.first }
                                             runCatching {
                                                 MediaStore.createDeleteRequest(context.contentResolver, uris)
                                             }.onSuccess { request ->
@@ -1344,6 +1357,11 @@ private fun LedgerApp() {
                     ProcessingResultCard(
                         result = result,
                         onDelete = requestPhotoDelete,
+                        onDismiss = {
+                            processingResults = processingResults.filterNot {
+                                it.candidate.uri == result.candidate.uri
+                            }
+                        },
                         onAutoBookRetryStored = { uri, amountText ->
                             ledgerCount += 1
                             bookedPhotoPrompts = bookedPhotoPrompts + BookedPhotoPrompt(
@@ -1380,6 +1398,9 @@ private fun LedgerApp() {
                         onResolved = {
                             pendingReviews = pendingReviews.filterNot { it.id == review.id }
                             if (it) ledgerCount += 1
+                        },
+                        onDeleted = {
+                            pendingReviews = pendingReviews.filterNot { it.id == review.id }
                         },
                     )
                 }
@@ -1604,6 +1625,7 @@ private fun PendingReviewCard(
     ledgerStore: LedgerStore,
     reviewStore: PendingReviewStore,
     onResolved: (Boolean) -> Unit,
+    onDeleted: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     var saving by remember(review.id) { mutableStateOf(false) }
@@ -1659,6 +1681,15 @@ private fun PendingReviewCard(
                 enabled = !saving && !saved && !dismissed,
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("忽略此待确认记录") }
+            OutlinedButton(
+                onClick = {
+                    scope.launch {
+                        if (reviewStore.delete(review.id)) onDeleted()
+                    }
+                },
+                enabled = !saving && !saved && !dismissed,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("删除疑似账目", color = MaterialTheme.colorScheme.error) }
         }
     }
 }
@@ -1667,6 +1698,7 @@ private fun PendingReviewCard(
 private fun ProcessingResultCard(
     result: PhotoProcessingResult,
     onDelete: (Uri) -> Unit,
+    onDismiss: () -> Unit,
     onAutoBookRetryStored: (Uri, String) -> Unit,
     ledgerStore: LedgerStore,
     onBooked: () -> Unit,
@@ -1835,6 +1867,12 @@ private fun ProcessingResultCard(
                                     "账目保存失败，请稍后重试",
                                     color = MaterialTheme.colorScheme.error,
                                 )
+                            }
+                            OutlinedButton(
+                                onClick = onDismiss,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text("删除疑似账目", color = MaterialTheme.colorScheme.error)
                             }
                         }
                         is LedgerDecision.Rejected -> Text("已忽略：" + decision.reason)

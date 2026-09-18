@@ -17,9 +17,7 @@ import androidx.room.Upsert
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.vibratez.ledger.security.SecureSettings
-import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
-import net.zetetic.database.Logger
-import net.zetetic.database.NoopTarget
+import java.nio.charset.StandardCharsets
 
 @Entity(
     tableName = "transactions",
@@ -284,6 +282,9 @@ interface PendingReviewDao {
 
     @Query("UPDATE pending_reviews SET status = :status WHERE id = :id")
     suspend fun updateStatus(id: String, status: String): Int
+
+    @Query("DELETE FROM pending_reviews WHERE id = :id")
+    suspend fun deleteById(id: String): Int
 }
 
 @Dao
@@ -341,20 +342,35 @@ abstract class LedgerDatabase : RoomDatabase() {
 
     companion object {
         fun open(context: Context, settings: SecureSettings): LedgerDatabase {
-            // SQLCipher's native core must be loaded before Room creates the helper.
-            System.loadLibrary("sqlcipher")
-            Logger.setTarget(NoopTarget())
-            val passphrase = settings.databasePassphrase()
-            val factory = SupportOpenHelperFactory(passphrase)
+            migrateEncryptedDatabaseIfNeeded(context)
             return Room.databaseBuilder(
                 context,
                 LedgerDatabase::class.java,
                 "ledger.db",
             )
-                .openHelperFactory(factory)
                 .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                 .build()
         }
+
+        private fun migrateEncryptedDatabaseIfNeeded(context: Context) {
+            val databaseFile = context.getDatabasePath("ledger.db")
+            if (!databaseFile.isFile || databaseFile.length() < SQLITE_HEADER.size) return
+            val header = runCatching {
+                databaseFile.inputStream().use { input -> ByteArray(SQLITE_HEADER.size).also { input.read(it) } }
+            }.getOrNull() ?: return
+            if (header.contentEquals(SQLITE_HEADER)) return
+            val backup = java.io.File(
+                databaseFile.parentFile,
+                "ledger.db.encrypted-backup-${System.currentTimeMillis()}",
+            )
+            check(databaseFile.renameTo(backup)) { "Unable to preserve legacy encrypted database" }
+            listOf("ledger.db-wal", "ledger.db-shm").forEach { suffix ->
+                val sidecar = java.io.File(databaseFile.parentFile, suffix)
+                if (sidecar.isFile) sidecar.renameTo(java.io.File(backup.parentFile, "${backup.name}-$suffix"))
+            }
+        }
+
+        private val SQLITE_HEADER = "SQLite format 3\u0000".toByteArray(StandardCharsets.US_ASCII)
 
         private val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
