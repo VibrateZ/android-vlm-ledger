@@ -14,6 +14,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -22,6 +24,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.KeyboardOptions
@@ -29,25 +32,35 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.AutoStories
+import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.automirrored.filled.ReceiptLong
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Switch
@@ -80,18 +93,31 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.annotation.RequiresApi
 import com.vibratez.ledger.ledger.LedgerDecision
+import com.vibratez.ledger.budget.BudgetStore
 import com.vibratez.ledger.ledger.LedgerStore
 import com.vibratez.ledger.ledger.PendingReview
 import com.vibratez.ledger.ledger.PendingReviewStore
 import com.vibratez.ledger.background.LedgerWorkScheduler
+import com.vibratez.ledger.background.ScreenshotObserverService
+import com.vibratez.ledger.ledger.LedgerExportFormat
+import com.vibratez.ledger.ledger.LedgerExporter
+import com.vibratez.ledger.ledger.ScreenshotQueueStore
+import com.vibratez.ledger.ledger.ScreenshotQueueSummary
 import com.vibratez.ledger.photo.AutoBookSaveState
 import com.vibratez.ledger.photo.MediaStorePhotoRepository
+import com.vibratez.ledger.photo.InstalledApp
+import com.vibratez.ledger.photo.InstalledAppRepository
 import com.vibratez.ledger.photo.PhotoProcessingResult
 import com.vibratez.ledger.photo.PhotoProcessor
 import com.vibratez.ledger.security.SecureSettings
+import com.vibratez.ledger.security.PackageFilterMode
+import com.vibratez.ledger.statement.OfficialStatementImporter
+import com.vibratez.ledger.statement.StatementParseResult
+import com.vibratez.ledger.statement.StatementPreview
 import com.vibratez.ledger.ui.LedgerConfirmationEditor
 import com.vibratez.ledger.vlm.ConnectionResult
 import com.vibratez.ledger.vlm.OpenAiVlmClient
+import com.vibratez.ledger.vlm.VlmApiProtocol
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -99,6 +125,7 @@ import kotlinx.coroutines.withContext
 import java.math.BigDecimal
 import java.util.Currency
 import java.util.Locale
+import java.time.LocalDate
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -110,6 +137,11 @@ class MainActivity : ComponentActivity() {
                 startupSettings.backgroundAutoProcessingEnabled &&
                 hasFullPhotoReadPermission(this),
         )
+        if (startupSettings.cloudEnabled && startupSettings.backgroundAutoProcessingEnabled &&
+            hasFullPhotoReadPermission(this)
+        ) {
+            runCatching { ScreenshotObserverService.start(this) }
+        }
         setContent {
             LedgerTheme {
                 LedgerApp()
@@ -222,6 +254,12 @@ private val LedgerShapes = Shapes(
     extraLarge = RoundedCornerShape(8.dp),
 )
 
+private enum class AppPage(val title: String) {
+    LEDGER("账本"),
+    RECOGNITION("识别"),
+    SETTINGS("设置"),
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LedgerApp() {
@@ -229,7 +267,13 @@ private fun LedgerApp() {
     val secureSettings = remember { SecureSettings(context.applicationContext) }
     val photoRepository = remember { MediaStorePhotoRepository(context.applicationContext) }
     val ledgerStore = remember { LedgerStore(context.applicationContext) }
+    val budgetStore = remember { BudgetStore(context.applicationContext) }
     val pendingReviewStore = remember { PendingReviewStore(context.applicationContext) }
+    val screenshotQueueStore = remember { ScreenshotQueueStore(context.applicationContext) }
+    val ledgerExporter = remember { LedgerExporter(context.applicationContext, ledgerStore) }
+    val statementImporter = remember {
+        OfficialStatementImporter(context.applicationContext, ledgerStore)
+    }
     val vlmClient = remember {
         OpenAiVlmClient(loadSystemPrompt(context))
     }
@@ -245,9 +289,22 @@ private fun LedgerApp() {
     val snackbar = remember { SnackbarHostState() }
 
     var settings by remember { mutableStateOf(secureSettings.load()) }
+    var currentPage by remember { mutableStateOf(AppPage.LEDGER) }
+    var protocol by remember { mutableStateOf(settings.protocol) }
     var baseUrl by remember { mutableStateOf(settings.baseUrl) }
     var model by remember { mutableStateOf(settings.model) }
     var timeout by remember { mutableStateOf(settings.timeoutSeconds.toString()) }
+    var keepOriginalCopies by remember { mutableStateOf(settings.keepOriginalCopies) }
+    var autoDeleteAfterBook by remember { mutableStateOf(settings.autoDeleteAfterBook) }
+    var packageFilterMode by remember { mutableStateOf(settings.packageFilterMode) }
+    var packageNames by remember { mutableStateOf(settings.packageNames) }
+    var showAppSelector by remember { mutableStateOf(false) }
+    var installedApps by remember { mutableStateOf<List<InstalledApp>>(emptyList()) }
+    var loadingInstalledApps by remember { mutableStateOf(false) }
+    var retryBaseMinutes by remember { mutableStateOf(settings.retryBaseMinutes.toString()) }
+    var retryMaxMinutes by remember { mutableStateOf(settings.retryMaxMinutes.toString()) }
+    var maxRetryAttempts by remember { mutableStateOf(settings.maxRetryAttempts.toString()) }
+    var enabledLedgerFields by remember { mutableStateOf(settings.enabledLedgerFields.joinToString(",")) }
     var apiKey by remember { mutableStateOf("") }
     var showConsent by remember { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
@@ -264,6 +321,11 @@ private fun LedgerApp() {
     var bookedPhotoPrompts by remember {
         mutableStateOf<List<BookedPhotoPrompt>>(emptyList())
     }
+    var statementPreview by remember { mutableStateOf<StatementPreview?>(null) }
+    var statementImportMessage by remember { mutableStateOf<String?>(null) }
+    var statementImportBusy by remember { mutableStateOf(false) }
+    var queueSummary by remember { mutableStateOf(ScreenshotQueueSummary(0, 0)) }
+    var pendingDeleteUris by remember { mutableStateOf<List<String>>(emptyList()) }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -291,6 +353,9 @@ private fun LedgerApp() {
             context,
             hasPhotoPermission && settings.cloudEnabled && settings.backgroundAutoProcessingEnabled,
         )
+        if (hasPhotoPermission && settings.cloudEnabled && settings.backgroundAutoProcessingEnabled) {
+            runCatching { ScreenshotObserverService.start(context) }
+        }
         if (!hasPhotoPermission) {
             scope.launch { snackbar.showSnackbar("未获得照片权限，自动识别已暂停") }
         }
@@ -298,9 +363,19 @@ private fun LedgerApp() {
     val deleteLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult(),
     ) {
+        val completedUris = pendingDeleteUris
+        pendingDeleteUris = emptyList()
         deleteMessage = if (it.resultCode == android.app.Activity.RESULT_OK) {
+            scope.launch {
+                screenshotQueueStore.markDeleteState(completedUris, ScreenshotQueueStore.DELETE_DELETED)
+                queueSummary = screenshotQueueStore.summary()
+            }
             "已按系统确认删除截图"
         } else {
+            scope.launch {
+                screenshotQueueStore.markDeleteState(completedUris, ScreenshotQueueStore.DELETE_PENDING)
+                queueSummary = screenshotQueueStore.summary()
+            }
             "已保留截图"
         }
     }
@@ -313,7 +388,14 @@ private fun LedgerApp() {
             deleteMessage = "未获得删除权限，已保留截图"
         } else {
             scope.launch {
-                deleteMessage = if (deleteDirectly(context, uri)) {
+                val deleted = deleteDirectly(context, uri)
+                screenshotQueueStore.markDeleteState(
+                    listOf(uri.toString()),
+                    if (deleted) ScreenshotQueueStore.DELETE_DELETED else ScreenshotQueueStore.DELETE_PENDING,
+                )
+                queueSummary = screenshotQueueStore.summary()
+                pendingDeleteUris = emptyList()
+                deleteMessage = if (deleted) {
                     "已删除截图"
                 } else {
                     "删除失败，已保留截图"
@@ -353,6 +435,53 @@ private fun LedgerApp() {
             }
         }
     }
+    val statementPickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        statementImportBusy = true
+        statementPreview = null
+        statementImportMessage = null
+        scope.launch {
+            try {
+                when (val result = statementImporter.preview(uri)) {
+                    is StatementParseResult.Valid -> {
+                        statementPreview = result.preview
+                        statementImportMessage = if (result.preview.transactions.isEmpty()) {
+                            "格式验证通过，但没有可导入的已完成收支记录"
+                        } else {
+                            "验证完成，请核对汇总后确认导入"
+                        }
+                    }
+                    is StatementParseResult.Invalid -> statementImportMessage = result.reason
+                }
+            } catch (_: Exception) {
+                statementImportMessage = "账单读取失败，请确认文件未加密且格式完整"
+            } finally {
+                statementImportBusy = false
+            }
+        }
+    }
+    val csvExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/csv"),
+    ) { uri ->
+        if (uri != null) scope.launch {
+            runCatching {
+                ledgerExporter.export(uri, LedgerExportFormat.CSV, settings.enabledLedgerFields)
+            }.onSuccess { snackbar.showSnackbar("已导出 $it 条账目") }
+                .onFailure { snackbar.showSnackbar("CSV 导出失败") }
+        }
+    }
+    val xlsxExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    ) { uri ->
+        if (uri != null) scope.launch {
+            runCatching {
+                ledgerExporter.export(uri, LedgerExportFormat.XLSX, settings.enabledLedgerFields)
+            }.onSuccess { snackbar.showSnackbar("已导出 $it 条账目") }
+                .onFailure { snackbar.showSnackbar("XLSX 导出失败") }
+        }
+    }
     val requestPhotoPermission = {
         permissionLauncher.launch(
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -373,6 +502,7 @@ private fun LedgerApp() {
             deleteMessage = "所选文件不属于 MediaStore，请在系统文件应用中删除"
             return@delete
         }
+        pendingDeleteUris = listOf(deleteUri.toString())
         when {
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> {
                 runCatching {
@@ -391,7 +521,15 @@ private fun LedgerApp() {
             Build.VERSION.SDK_INT == Build.VERSION_CODES.Q -> {
                 scope.launch {
                     when (val result = deleteOnAndroid10(context, deleteUri)) {
-                        DeleteAttempt.Deleted -> deleteMessage = "已删除截图"
+                        DeleteAttempt.Deleted -> {
+                            screenshotQueueStore.markDeleteState(
+                                listOf(deleteUri.toString()),
+                                ScreenshotQueueStore.DELETE_DELETED,
+                            )
+                            queueSummary = screenshotQueueStore.summary()
+                            pendingDeleteUris = emptyList()
+                            deleteMessage = "已删除截图"
+                        }
                         DeleteAttempt.Failed -> deleteMessage = "删除失败，已保留截图"
                         is DeleteAttempt.RequiresConfirmation -> {
                             deleteLauncher.launch(
@@ -408,7 +546,14 @@ private fun LedgerApp() {
                 Manifest.permission.WRITE_EXTERNAL_STORAGE,
             ) == PackageManager.PERMISSION_GRANTED -> {
                 scope.launch {
-                    deleteMessage = if (deleteDirectly(context, deleteUri)) {
+                    val deleted = deleteDirectly(context, deleteUri)
+                    screenshotQueueStore.markDeleteState(
+                        listOf(deleteUri.toString()),
+                        if (deleted) ScreenshotQueueStore.DELETE_DELETED else ScreenshotQueueStore.DELETE_PENDING,
+                    )
+                    queueSummary = screenshotQueueStore.summary()
+                    pendingDeleteUris = emptyList()
+                    deleteMessage = if (deleted) {
                         "已删除截图"
                     } else {
                         "删除失败，已保留截图"
@@ -427,12 +572,16 @@ private fun LedgerApp() {
     LaunchedEffect(Unit) {
         ledgerCount = ledgerStore.all().size
         pendingReviews = pendingReviewStore.pending()
+        queueSummary = screenshotQueueStore.summary()
+    }
+    LaunchedEffect(currentPage) {
+        if (currentPage == AppPage.SETTINGS) queueSummary = screenshotQueueStore.summary()
     }
 
     Scaffold(
         topBar = {
             CenterAlignedTopAppBar(
-                title = { Text("云端智能记账") },
+                title = { Text(currentPage.title) },
                 navigationIcon = {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.ReceiptLong,
@@ -447,16 +596,48 @@ private fun LedgerApp() {
                 ),
             )
         },
+        bottomBar = {
+            NavigationBar {
+                NavigationBarItem(
+                    selected = currentPage == AppPage.LEDGER,
+                    onClick = { currentPage = AppPage.LEDGER },
+                    icon = { Icon(Icons.Default.AutoStories, contentDescription = null) },
+                    label = { Text("账本") },
+                )
+                NavigationBarItem(
+                    selected = currentPage == AppPage.RECOGNITION,
+                    onClick = { currentPage = AppPage.RECOGNITION },
+                    icon = { Icon(Icons.Default.CameraAlt, contentDescription = null) },
+                    label = { Text("识别") },
+                )
+                NavigationBarItem(
+                    selected = currentPage == AppPage.SETTINGS,
+                    onClick = { currentPage = AppPage.SETTINGS },
+                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                    label = { Text("设置") },
+                )
+            }
+        },
         snackbarHost = { SnackbarHost(snackbar) },
         containerColor = MaterialTheme.colorScheme.background,
     ) { padding ->
-        LazyColumn(
+        if (currentPage == AppPage.LEDGER) {
+            LedgerHomeScreen(
+                budgetStore = budgetStore,
+                ledgerStore = ledgerStore,
+                refreshKey = ledgerCount,
+                modifier = Modifier.padding(padding),
+                showMessage = snackbar::showSnackbar,
+            )
+        } else {
+            LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            if (currentPage == AppPage.SETTINGS) {
             item {
                 Spacer(Modifier.height(4.dp))
                 Text(
@@ -522,6 +703,7 @@ private fun LedgerApp() {
                                         secureSettings.save(updated, null)
                                         settings = secureSettings.load()
                                         LedgerWorkScheduler.reconcile(context, false)
+                                        ScreenshotObserverService.stop(context)
                                     }
                                 },
                             )
@@ -566,6 +748,11 @@ private fun LedgerApp() {
                                         secureSettings.save(updated, null)
                                         settings = secureSettings.load()
                                         LedgerWorkScheduler.reconcile(context, checked && settings.cloudEnabled)
+                                        if (checked) {
+                                            runCatching { ScreenshotObserverService.start(context) }
+                                        } else {
+                                            ScreenshotObserverService.stop(context)
+                                        }
                                         if (checked && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
                                             ContextCompat.checkSelfPermission(
                                                 context,
@@ -578,6 +765,42 @@ private fun LedgerApp() {
                                 },
                             )
                         }
+                        Text(
+                            "接口协议",
+                            style = MaterialTheme.typography.labelLarge,
+                        )
+                        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                            VlmApiProtocol.entries.forEachIndexed { index, option ->
+                                SegmentedButton(
+                                    selected = protocol == option,
+                                    onClick = {
+                                        protocol = option
+                                        connectionText = null
+                                    },
+                                    shape = SegmentedButtonDefaults.itemShape(
+                                        index = index,
+                                        count = VlmApiProtocol.entries.size,
+                                    ),
+                                ) {
+                                    Text(
+                                        if (option == VlmApiProtocol.RESPONSES) {
+                                            "Responses"
+                                        } else {
+                                            "Chat Completions"
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                        Text(
+                            if (protocol == VlmApiProtocol.CHAT_COMPLETIONS) {
+                                "硅基流动等视觉模型：Prompt 与图片在同一条消息中提交"
+                            } else {
+                                "支持 OpenAI Responses API 及其兼容服务"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                         OutlinedTextField(
                             value = baseUrl,
                             onValueChange = { baseUrl = it },
@@ -620,6 +843,7 @@ private fun LedgerApp() {
                                         )
                                         settings = secureSettings.load()
                                         LedgerWorkScheduler.reconcile(context, false)
+                                        ScreenshotObserverService.stop(context)
                                         apiKey = ""
                                         connectionText = null
                                         scope.launch { snackbar.showSnackbar("API Key 已清除，云端识别已关闭") }
@@ -669,6 +893,7 @@ private fun LedgerApp() {
                                                 apiKey = key,
                                                 model = model.trim(),
                                                 timeoutSeconds = timeoutSeconds!!,
+                                                protocol = protocol,
                                             )
                                         }
                                         testing = false
@@ -676,8 +901,13 @@ private fun LedgerApp() {
                                             is ConnectionResult.Success ->
                                                 if (result.modelAvailable) "连接成功，模型可用"
                                                 else "服务可连接，但未从模型列表确认该模型"
-                                            is ConnectionResult.Failure ->
+                                            is ConnectionResult.Failure -> if (
+                                                result.detail == "chat_text_response_unsupported"
+                                            ) {
+                                                "连接失败：模型或中转未返回预期文本"
+                                            } else {
                                                 "连接失败：" + result.category.name.lowercase(Locale.ROOT)
+                                            }
                                         }
                                     }
                                 },
@@ -703,10 +933,23 @@ private fun LedgerApp() {
                                     saving = true
                                     secureSettings.save(
                                         settings.copy(
+                                            protocol = protocol,
                                             baseUrl = baseUrl.trim().trimEnd('/'),
-                                            model = model.trim(),
-                                            timeoutSeconds = timeoutSeconds ?: 60,
-                                        ),
+                                             model = model.trim(),
+                                             timeoutSeconds = timeoutSeconds ?: 60,
+                                             keepOriginalCopies = keepOriginalCopies,
+                                             autoDeleteAfterBook = autoDeleteAfterBook,
+                                             packageFilterMode = packageFilterMode,
+                                             packageNames = packageNames,
+                                             retryBaseMinutes = retryBaseMinutes.toIntOrNull() ?: 5,
+                                             retryMaxMinutes = retryMaxMinutes.toIntOrNull() ?: 180,
+                                             maxRetryAttempts = maxRetryAttempts.toIntOrNull() ?: 8,
+                                             enabledLedgerFields = enabledLedgerFields
+                                                 .split(',', '\n', ';')
+                                                 .map(String::trim)
+                                                 .filter(String::isNotEmpty)
+                                                 .toSet(),
+                                         ),
                                         key,
                                     )
                                     settings = secureSettings.load()
@@ -714,6 +957,9 @@ private fun LedgerApp() {
                                         context,
                                         settings.cloudEnabled && settings.backgroundAutoProcessingEnabled,
                                     )
+                                    if (settings.cloudEnabled && settings.backgroundAutoProcessingEnabled) {
+                                        runCatching { ScreenshotObserverService.start(context) }
+                                    }
                                     apiKey = ""
                                     saving = false
                                     scope.launch { snackbar.showSnackbar("设置已保存") }
@@ -744,6 +990,246 @@ private fun LedgerApp() {
                         }
                     }
                 }
+            }
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.24f)),
+                ) {
+                    Column(
+                        Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Text("自动化与数据", style = MaterialTheme.typography.titleMedium)
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("应用内保留原图副本")
+                                Text("仅成功入账后复制到应用私有目录", style = MaterialTheme.typography.bodySmall)
+                            }
+                            Switch(checked = keepOriginalCopies, onCheckedChange = { keepOriginalCopies = it })
+                        }
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("入账后加入删除队列")
+                                Text("Android 10+ 仍需系统确认", style = MaterialTheme.typography.bodySmall)
+                            }
+                            Switch(checked = autoDeleteAfterBook, onCheckedChange = { autoDeleteAfterBook = it })
+                        }
+                        Text("截图包名规则", style = MaterialTheme.typography.labelLarge)
+                        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                            PackageFilterMode.entries.forEachIndexed { index, option ->
+                                SegmentedButton(
+                                    selected = packageFilterMode == option,
+                                    onClick = { packageFilterMode = option },
+                                    shape = SegmentedButtonDefaults.itemShape(index, PackageFilterMode.entries.size),
+                                ) {
+                                    Text(
+                                        when (option) {
+                                            PackageFilterMode.ALL -> "全部"
+                                            PackageFilterMode.WHITELIST -> "白名单"
+                                            PackageFilterMode.BLACKLIST -> "黑名单"
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                        if (packageFilterMode != PackageFilterMode.ALL) {
+                            OutlinedButton(
+                                onClick = {
+                                    showAppSelector = true
+                                    if (installedApps.isEmpty() && !loadingInstalledApps) {
+                                        loadingInstalledApps = true
+                                        scope.launch {
+                                            installedApps = withContext(Dispatchers.IO) {
+                                                InstalledAppRepository(context.applicationContext).launcherApps()
+                                            }
+                                            loadingInstalledApps = false
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text("选择应用（已选 ${packageNames.size} 个）")
+                            }
+                            if (packageNames.isNotEmpty()) {
+                                Text(
+                                    packageNames.sorted().joinToString("\n") { packageName ->
+                                        installedApps.firstOrNull { it.packageName == packageName }?.label
+                                            ?.let { "$it · $packageName" }
+                                            ?: packageName
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = retryBaseMinutes,
+                                onValueChange = { if (it.all(Char::isDigit)) retryBaseMinutes = it },
+                                modifier = Modifier.weight(1f),
+                                label = { Text("初始重试/分") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            )
+                            OutlinedTextField(
+                                value = retryMaxMinutes,
+                                onValueChange = { if (it.all(Char::isDigit)) retryMaxMinutes = it },
+                                modifier = Modifier.weight(1f),
+                                label = { Text("最长等待/分") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            )
+                            OutlinedTextField(
+                                value = maxRetryAttempts,
+                                onValueChange = { if (it.all(Char::isDigit)) maxRetryAttempts = it },
+                                modifier = Modifier.weight(1f),
+                                label = { Text("最大次数") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            )
+                        }
+                        OutlinedTextField(
+                            value = enabledLedgerFields,
+                            onValueChange = { enabledLedgerFields = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("启用的记账/导出字段") },
+                            supportingText = {
+                                Text("amount,currency,direction,occurred_at,merchant,counterparty,item_name,platform,external_id,tag,account,payment_method,note")
+                            },
+                            minLines = 2,
+                        )
+                        Button(
+                            onClick = {
+                                val updated = settings.copy(
+                                    keepOriginalCopies = keepOriginalCopies,
+                                    autoDeleteAfterBook = autoDeleteAfterBook,
+                                    packageFilterMode = packageFilterMode,
+                                    packageNames = packageNames,
+                                    retryBaseMinutes = retryBaseMinutes.toIntOrNull() ?: 5,
+                                    retryMaxMinutes = retryMaxMinutes.toIntOrNull() ?: 180,
+                                    maxRetryAttempts = maxRetryAttempts.toIntOrNull() ?: 8,
+                                    enabledLedgerFields = enabledLedgerFields.split(',', '\n', ';')
+                                        .map(String::trim).filter(String::isNotEmpty).toSet(),
+                                )
+                                secureSettings.save(updated, null)
+                                settings = secureSettings.load()
+                                secureSettings.setLastDiscoveryAtMillis(0L)
+                                if (settings.cloudEnabled && settings.backgroundAutoProcessingEnabled) {
+                                    LedgerWorkScheduler.enqueueNow(context)
+                                }
+                                scope.launch { snackbar.showSnackbar("自动化与字段设置已保存") }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("保存自动化设置") }
+                        Text("队列：${queueSummary.active} 待处理 · ${queueSummary.pendingDelete} 待删除确认")
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    secureSettings.clearApiPause()
+                                    LedgerWorkScheduler.enqueueDiscoveryNow(context)
+                                    LedgerWorkScheduler.restartProcessing(context)
+                                    scope.launch { snackbar.showSnackbar("已恢复队列处理") }
+                                },
+                                modifier = Modifier.weight(1f),
+                            ) { Text("立即重试") }
+                            OutlinedButton(
+                                onClick = {
+                                    scope.launch {
+                                        val jobs = screenshotQueueStore.pendingDeletes()
+                                        if (jobs.isEmpty()) {
+                                            snackbar.showSnackbar("没有待删除截图")
+                                        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                            val uris = jobs.map { Uri.parse(it.sourceUri) }
+                                            pendingDeleteUris = jobs.map { it.sourceUri }
+                                            runCatching {
+                                                MediaStore.createDeleteRequest(context.contentResolver, uris)
+                                            }.onSuccess { request ->
+                                                deleteLauncher.launch(
+                                                    IntentSenderRequest.Builder(request.intentSender).build(),
+                                                )
+                                            }.onFailure {
+                                                pendingDeleteUris = emptyList()
+                                                snackbar.showSnackbar("无法发起系统批量删除确认")
+                                            }
+                                        } else {
+                                            requestPhotoDelete(Uri.parse(jobs.first().sourceUri))
+                                            snackbar.showSnackbar("当前 Android 版本需逐张确认删除")
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.weight(1f),
+                            ) { Text("确认删除截图") }
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                onClick = { csvExportLauncher.launch("ledger-${LocalDate.now()}.csv") },
+                                modifier = Modifier.weight(1f),
+                            ) { Text("导出 CSV") }
+                            OutlinedButton(
+                                onClick = { xlsxExportLauncher.launch("ledger-${LocalDate.now()}.xlsx") },
+                                modifier = Modifier.weight(1f),
+                            ) { Text("导出 XLSX") }
+                        }
+                    }
+                }
+            }
+            item {
+                Text(
+                    "应用版本 ${BuildConfig.VERSION_NAME}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 20.dp),
+                )
+            }
+            }
+            if (currentPage == AppPage.RECOGNITION) {
+            item {
+                Spacer(Modifier.height(4.dp))
+                StatementImportCard(
+                    preview = statementPreview,
+                    message = statementImportMessage,
+                    busy = statementImportBusy,
+                    onPick = {
+                        statementPickerLauncher.launch(
+                            arrayOf(
+                                "text/csv",
+                                "text/comma-separated-values",
+                                "application/vnd.ms-excel",
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                "application/zip",
+                                "application/octet-stream",
+                            ),
+                        )
+                    },
+                    onConfirm = {
+                        val preview = statementPreview ?: return@StatementImportCard
+                        statementImportBusy = true
+                        scope.launch {
+                            try {
+                                val result = statementImporter.commit(preview)
+                                ledgerCount = ledgerStore.all().size
+                                statementImportMessage =
+                                    "已导入 ${result.imported} 条，跳过重复 ${result.duplicates} 条"
+                                statementPreview = null
+                            } catch (_: Exception) {
+                                statementImportMessage = "账单导入失败，未完成的记录可重新导入"
+                            } finally {
+                                statementImportBusy = false
+                            }
+                        }
+                    },
+                    onClear = {
+                        statementPreview = null
+                        statementImportMessage = null
+                    },
+                )
             }
             item {
                 HorizontalDivider(
@@ -906,7 +1392,22 @@ private fun LedgerApp() {
                     modifier = Modifier.padding(bottom = 20.dp),
                 )
             }
+            }
         }
+        }
+    }
+
+    if (showAppSelector) {
+        InstalledAppSelectorDialog(
+            apps = installedApps,
+            selectedPackages = packageNames,
+            loading = loadingInstalledApps,
+            onDismiss = { showAppSelector = false },
+            onConfirm = {
+                packageNames = it
+                showAppSelector = false
+            },
+        )
     }
 
     if (showConsent) {
@@ -965,6 +1466,136 @@ private fun LedgerApp() {
             },
         )
     }
+}
+
+@Composable
+private fun InstalledAppSelectorDialog(
+    apps: List<InstalledApp>,
+    selectedPackages: Set<String>,
+    loading: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: (Set<String>) -> Unit,
+) {
+    var search by remember { mutableStateOf("") }
+    var selected by remember(selectedPackages, apps) { mutableStateOf(selectedPackages) }
+    val visibleApps = remember(apps, search) {
+        val query = search.trim()
+        if (query.isEmpty()) apps else apps.filter {
+            it.label.contains(query, ignoreCase = true) ||
+                it.packageName.contains(query, ignoreCase = true)
+        }
+    }
+    val unavailablePackages = selected.filter { selectedPackage ->
+        apps.none { it.packageName == selectedPackage }
+    }.sorted()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择应用") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = search,
+                    onValueChange = { search = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("搜索应用或包名") },
+                    singleLine = true,
+                )
+                if (loading) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                        horizontalArrangement = Arrangement.Center,
+                    ) { CircularProgressIndicator() }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        items(visibleApps, key = InstalledApp::packageName) { app ->
+                            val checked = app.packageName in selected
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        selected = if (checked) selected - app.packageName
+                                        else selected + app.packageName
+                                    }
+                                    .padding(vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                if (app.icon != null) {
+                                    Image(
+                                        bitmap = app.icon,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(36.dp),
+                                    )
+                                } else {
+                                    Icon(
+                                        Icons.Default.Apps,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(36.dp),
+                                    )
+                                }
+                                Column(Modifier.weight(1f)) {
+                                    Text(app.label, style = MaterialTheme.typography.bodyMedium)
+                                    Text(
+                                        app.packageName,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Checkbox(
+                                    checked = checked,
+                                    onCheckedChange = {
+                                        selected = if (checked) selected - app.packageName
+                                        else selected + app.packageName
+                                    },
+                                )
+                            }
+                        }
+                        if (search.isBlank()) {
+                            items(unavailablePackages, key = { "unavailable:$it" }) { packageName ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { selected = selected - packageName }
+                                        .padding(vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text("已保存的应用", style = MaterialTheme.typography.bodyMedium)
+                                        Text(
+                                            packageName,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    Checkbox(
+                                        checked = true,
+                                        onCheckedChange = { selected = selected - packageName },
+                                    )
+                                }
+                            }
+                        }
+                        if (visibleApps.isEmpty() && unavailablePackages.isEmpty()) {
+                            item {
+                                Text(
+                                    if (search.isBlank()) "没有可选择的应用" else "没有匹配的应用",
+                                    modifier = Modifier.padding(vertical = 20.dp),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(selected) }, enabled = !loading) { Text("确定") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
 }
 
 @Composable
@@ -1143,15 +1774,17 @@ private fun ProcessingResultCard(
                             }
                         }
                         is LedgerDecision.NeedsConfirmation -> {
+                            val invalidResponse = decision.reason.startsWith("INVALID_RESPONSE:")
+                            val diagnosticCode = decision.reason.substringAfter(':', missingDelimiterValue = "")
                             Text(
-                                if (decision.reason == "INVALID_RESPONSE") {
-                                    "模型响应无效，未采用任何模型字段"
+                                if (invalidResponse) {
+                                    "模型响应无效，未采用任何模型字段（$diagnosticCode）"
                                 } else {
                                     "检测到疑似支付截图：" + decision.reason
                                 },
                             )
                             Text(
-                                if (decision.reason == "INVALID_RESPONSE") {
+                                if (invalidResponse) {
                                     "如确认这是交易截图，请在空白表单中填写并核对后录入。"
                                 } else {
                                     "请核对并修正以下字段后再录入。"

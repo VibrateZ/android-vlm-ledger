@@ -27,6 +27,134 @@ class LedgerDecisionEngineTest {
     }
 
     @Test
+    fun autoBooksImmediateWeChatSuccessUsingFreshScreenshotTime() {
+        val estimatedLedger = ledger().copy(
+            occurredAt = occurredAt.plusMinutes(2),
+            timeSource = TimeSource.SCREENSHOT_ESTIMATED,
+            evidence = ledger().evidence.copy(
+                positiveFeatures = listOf(
+                    "PAYMENT_SUCCESS",
+                    "PLATFORM_MARKER",
+                    "UNIQUE_AMOUNT",
+                    "MERCHANT_MARKER",
+                    "FRESH_TIME",
+                ),
+            ),
+        )
+        val decision = LedgerDecisionEngine().decide(
+            response = VlmResponse(estimatedLedger, null, "test-model"),
+            evidence = evidence("wechat-immediate", capturedAtMillis),
+        )
+
+        assertTrue(decision is LedgerDecision.AutoBook)
+    }
+
+    @Test
+    fun autoBooksStatusBarMinuteCombinedWithScreenshotDate() {
+        val statusBarTime = OffsetDateTime.parse("2026-09-14T12:32:00+08:00")
+        val capturedAtWithSeconds = OffsetDateTime.parse("2026-09-14T12:32:56+08:00")
+        val estimatedLedger = ledger().copy(
+            occurredAt = statusBarTime,
+            timeSource = TimeSource.SCREENSHOT_ESTIMATED,
+            evidence = ledger().evidence.copy(
+                positiveFeatures = listOf(
+                    "PAYMENT_SUCCESS",
+                    "PLATFORM_MARKER",
+                    "UNIQUE_AMOUNT",
+                    "MERCHANT_MARKER",
+                    "FRESH_TIME",
+                ),
+            ),
+        )
+
+        val decision = LedgerDecisionEngine().decide(
+            response = VlmResponse(estimatedLedger, null, "test-model"),
+            evidence = evidence(
+                "status-bar-minute",
+                capturedAtWithSeconds.toInstant().toEpochMilli(),
+            ),
+        )
+
+        assertTrue(decision is LedgerDecision.AutoBook)
+    }
+
+    @Test
+    fun autoBooksImmediateAlipaySuccessUsingFreshScreenshotTime() {
+        val estimatedLedger = ledger().copy(
+            platform = Platform.ALIPAY,
+            occurredAt = occurredAt.plusMinutes(2),
+            timeSource = TimeSource.SCREENSHOT_ESTIMATED,
+            evidence = ledger().evidence.copy(
+                positiveFeatures = listOf(
+                    "PAYMENT_SUCCESS",
+                    "PLATFORM_MARKER",
+                    "UNIQUE_AMOUNT",
+                    "MERCHANT_MARKER",
+                    "FRESH_TIME",
+                ),
+            ),
+        )
+        val decision = LedgerDecisionEngine().decide(
+            response = VlmResponse(estimatedLedger, null, "test-model"),
+            evidence = evidence(
+                "alipay-immediate",
+                capturedAtMillis,
+                "com.eg.android.AlipayGphone",
+            ),
+        )
+
+        assertTrue(decision is LedgerDecision.AutoBook)
+    }
+
+    @Test
+    fun requiresConfirmationWhenEstimatedSuccessHasNoPayeeStructure() {
+        val estimatedLedger = ledger().copy(
+            merchant = null,
+            occurredAt = occurredAt.plusMinutes(2),
+            timeSource = TimeSource.SCREENSHOT_ESTIMATED,
+            evidence = ledger().evidence.copy(
+                positiveFeatures = listOf(
+                    "PAYMENT_SUCCESS",
+                    "PLATFORM_MARKER",
+                    "UNIQUE_AMOUNT",
+                    "MERCHANT_MARKER",
+                    "FRESH_TIME",
+                ),
+            ),
+        )
+        val decision = LedgerDecisionEngine().decide(
+            response = VlmResponse(estimatedLedger, null, "test-model"),
+            evidence = evidence("no-payee-structure", capturedAtMillis),
+        )
+
+        assertTrue(decision is LedgerDecision.NeedsConfirmation)
+    }
+
+    @Test
+    fun requiresConfirmationWhenEstimatedSuccessComesFromHistoryDetail() {
+        val estimatedLedger = ledger().copy(
+            occurredAt = occurredAt.plusMinutes(2),
+            timeSource = TimeSource.SCREENSHOT_ESTIMATED,
+            evidence = ledger().evidence.copy(
+                positiveFeatures = listOf(
+                    "PAYMENT_SUCCESS",
+                    "PLATFORM_MARKER",
+                    "UNIQUE_AMOUNT",
+                    "MERCHANT_MARKER",
+                    "FRESH_TIME",
+                ),
+                negativeFeatures = listOf("HISTORY_DETAIL"),
+            ),
+        )
+        val decision = LedgerDecisionEngine().decide(
+            response = VlmResponse(estimatedLedger, null, "test-model"),
+            evidence = evidence("history-detail", capturedAtMillis),
+        )
+
+        assertTrue(decision is LedgerDecision.NeedsConfirmation)
+    }
+
+    @Test
     fun requiresConfirmationWhenMediaTimestampIsOutsideWindow() {
         val decision = LedgerDecisionEngine().decide(
             response = response(),
@@ -108,9 +236,14 @@ class LedgerDecisionEngineTest {
         ),
     )
 
-    private fun evidence(hash: String, capturedAt: Long?) = PhotoEvidence(
+    private fun evidence(
+        hash: String,
+        capturedAt: Long?,
+        sourcePackage: String = "com.tencent.mm",
+    ) = PhotoEvidence(
         uri = "content://media/$hash",
         sha256 = hash,
         screenshotCapturedAtMillis = capturedAt,
+        screenshotSourcePackage = sourcePackage,
     )
 }

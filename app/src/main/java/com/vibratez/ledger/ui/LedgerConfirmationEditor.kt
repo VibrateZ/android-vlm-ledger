@@ -135,15 +135,17 @@ fun LedgerConfirmationEditor(
         }
         Button(
             onClick = {
-                val amountMinor = parseAmountMinor(amount, currency)
-                val time = runCatching { OffsetDateTime.parse(occurredAt) }.getOrNull()
+                val amountMinor = if (amount.isBlank()) null else parseAmountMinor(amount, currency)
+                val time = if (occurredAt.isBlank()) null else {
+                    runCatching { OffsetDateTime.parse(occurredAt) }.getOrNull()
+                }
                 val error = when {
-                    platform == Platform.UNKNOWN -> "请选择交易平台"
-                    direction == Direction.UNKNOWN -> "请选择收支方向"
-                    !Regex("[A-Z]{3}").matches(currency) || currencyFractionDigits(currency) == null ->
+                    currency.isNotBlank() &&
+                        (!Regex("[A-Z]{3}").matches(currency) || currencyFractionDigits(currency) == null) ->
                         "币种必须是有效的三位 ISO-4217 代码"
-                    amountMinor == null -> "金额必须大于 0，且小数位数符合所选币种"
-                    time == null -> "交易时间必须是带时区的 RFC3339 时间"
+                    amount.isNotBlank() && amountMinor == null ->
+                        "填写金额时必须同时填写有效币种，且金额需大于 0"
+                    occurredAt.isNotBlank() && time == null -> "交易时间必须是带时区的 RFC3339 时间"
                     merchant != merchant.trim() || merchant.any(Char::isISOControl) ->
                         "商户字段不能包含首尾空格或控制字符"
                     counterparty != counterparty.trim() || counterparty.any(Char::isISOControl) ->
@@ -163,11 +165,11 @@ fun LedgerConfirmationEditor(
                             platform = platform,
                             direction = direction,
                             amountMinor = amountMinor,
-                            currency = currency,
+                            currency = currency.ifBlank { null },
                             merchant = merchant.ifEmpty { null },
                             counterparty = counterparty.ifEmpty { null },
                             occurredAt = time,
-                            timeSource = TimeSource.USER_CONFIRMED,
+                            timeSource = if (time == null) null else TimeSource.USER_CONFIRMED,
                             externalId = externalId.ifEmpty { null },
                             suggestedTag = suggestedTag.ifEmpty { null },
                         ),
@@ -182,7 +184,7 @@ fun LedgerConfirmationEditor(
                     saving -> "保存中"
                     saved -> "已确认录入"
                     alreadyStored -> "已存在相同账目"
-                    else -> "核对无误并录入"
+                    else -> "保存账目（允许缺失字段）"
                 },
             )
         }

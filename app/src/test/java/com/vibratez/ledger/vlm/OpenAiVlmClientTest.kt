@@ -44,24 +44,293 @@ class OpenAiVlmClientTest {
             mimeType = "image/png",
             imageBytes = byteArrayOf(0, 1, 2, 3, 4),
         )
-        val body = client.buildStreamingRequestBody(request, includeJsonSchema = true)
+        val body = client.buildStreamingRequestBody(request)
         val output = ByteArrayOutputStream()
 
         body.writeTo(output)
 
         assertEquals(body.contentLength, output.size().toLong())
         val root = JSONObject(output.toString(Charsets.UTF_8.name()))
-        val url = root.getJSONArray("messages")
-            .getJSONObject(1)
+        val url = root.getJSONArray("input")
+            .getJSONObject(0)
             .getJSONArray("content")
             .getJSONObject(1)
-            .getJSONObject("image_url")
-            .getString("url")
+            .getString("image_url")
         assertEquals(
             "data:image/png;base64," + Base64.getEncoder().encodeToString(request.imageBytes),
             url,
         )
-        assertTrue(root.has("response_format"))
+        assertEquals("test prompt", root.getString("instructions"))
+        assertEquals("input_text", root.getJSONArray("input")
+            .getJSONObject(0).getJSONArray("content").getJSONObject(0).getString("type"))
+        val inputText = root.getJSONArray("input")
+            .getJSONObject(0).getJSONArray("content").getJSONObject(0).getString("text")
+        assertTrue(inputText.contains("ledger.capture.v1"))
+        assertTrue(inputText.contains("不要读取时间"))
+        assertFalse(inputText.contains("screenshot_estimated_at"))
+        assertTrue(inputText.contains("/no_think"))
+        assertEquals(
+            "json_schema",
+            root.getJSONObject("text").getJSONObject("format").getString("type"),
+        )
+        assertFalse(root.has("messages"))
+        assertFalse(root.has("response_format"))
+        assertFalse(root.has("tools"))
+        assertFalse(root.has("tool_choice"))
+    }
+
+    @Test
+    fun responsesRequestAlwaysUsesJsonSchemaWithoutTools() {
+        val body = client.buildStreamingRequestBody(request("test-model"))
+        val output = ByteArrayOutputStream()
+
+        body.writeTo(output)
+
+        val root = JSONObject(output.toString(Charsets.UTF_8.name()))
+        assertEquals(
+            "json_schema",
+            root.getJSONObject("text").getJSONObject("format").getString("type"),
+        )
+        assertFalse(root.has("tools"))
+        assertFalse(root.has("tool_choice"))
+        assertFalse(root.has("parallel_tool_calls"))
+    }
+
+    @Test
+    fun chatCompletionsBodySubmitsPromptAndImageInOneUserMessage() {
+        val request = request("Qwen/Qwen3.8-27B").copy(
+            imageBytes = byteArrayOf(5, 6, 7),
+            screenshotCapturedAt = "2026-09-17T12:34:56.789+08:00",
+            sourcePackage = "com.tencent.mm",
+        )
+        val body = client.buildChatCompletionsRequestBody(request)
+        val output = ByteArrayOutputStream()
+
+        body.writeTo(output)
+
+        assertEquals(body.contentLength, output.size().toLong())
+        val root = JSONObject(output.toString(Charsets.UTF_8.name()))
+        val messages = root.getJSONArray("messages")
+        assertEquals(1, messages.length())
+        assertEquals("user", messages.getJSONObject(0).getString("role"))
+        val content = messages.getJSONObject(0).getJSONArray("content")
+        assertEquals("text", content.getJSONObject(0).getString("type"))
+        val prompt = content.getJSONObject(0).getString("text")
+        assertTrue(prompt.startsWith("test prompt\n\n"))
+        assertTrue(prompt.contains("ledger.capture.v1"))
+        assertEquals(
+            "data:image/png;base64," + Base64.getEncoder().encodeToString(request.imageBytes),
+            content.getJSONObject(1).getJSONObject("image_url").getString("url"),
+        )
+        assertEquals(
+            "high",
+            content.getJSONObject(1).getJSONObject("image_url").getString("detail"),
+        )
+        assertTrue(prompt.contains("不要读取时间"))
+        assertFalse(prompt.contains("2026-09-17T12:34"))
+        assertFalse(prompt.contains("com.tencent.mm"))
+        assertTrue(prompt.endsWith("/no_think"))
+        assertFalse(root.getBoolean("enable_thinking"))
+        assertFalse(root.has("response_format"))
+        assertFalse(root.has("tools"))
+        assertFalse(root.has("tool_choice"))
+        assertFalse(root.has("parallel_tool_calls"))
+        assertFalse(root.has("input"))
+        assertFalse(root.has("text"))
+    }
+
+    @Test
+    fun chatConnectionProbeRequestsPlainTextWithoutImage() {
+        val root = client.buildChatContentProbeBody("gemini-3.8-flash")
+
+        assertEquals("gemini-3.8-flash", root.getString("model"))
+        assertEquals(
+            "只返回 OK，不要解释。\n/no_think",
+            root.getJSONArray("messages").getJSONObject(0).getString("content"),
+        )
+        assertEquals(64, root.getInt("max_tokens"))
+        assertFalse(root.has("enable_thinking"))
+        assertFalse(root.has("response_format"))
+        assertFalse(root.has("tools"))
+        assertFalse(root.has("tool_choice"))
+        assertFalse(root.toString().contains("image_url"))
+    }
+
+    @Test
+    fun chatConnectionProbeRequiresPlainOkResult() {
+        val valid = JSONObject()
+            .put(
+                "choices",
+                JSONArray().put(
+                    JSONObject().put(
+                        "message",
+                        JSONObject().put("content", "OK"),
+                    ),
+                ),
+            )
+            .toString()
+        val invalid = JSONObject()
+            .put(
+                "choices",
+                JSONArray().put(
+                    JSONObject().put("message", JSONObject().put("content", "not OK")),
+                ),
+            )
+            .toString()
+
+        assertTrue(
+            client.classifyChatContentProbe(HttpResult(200, valid), modelAvailable = true) is
+                ConnectionResult.Success,
+        )
+        val failure = client.classifyChatContentProbe(
+            HttpResult(200, invalid),
+            modelAvailable = true,
+        ) as ConnectionResult.Failure
+        assertEquals("chat_text_response_unsupported", failure.detail)
+    }
+
+    @Test
+    fun normalizesBaseUrlToResponsesEndpoint() {
+        assertEquals("https://api.example.com/v1/responses", client.normalizeEndpoint("https://api.example.com"))
+        assertEquals("https://api.example.com/v1/responses", client.normalizeEndpoint("https://api.example.com/v1/"))
+    }
+
+    @Test
+    fun normalizesBaseUrlToChatCompletionsEndpoint() {
+        assertEquals(
+            "https://api.siliconflow.cn/v1/chat/completions",
+            client.normalizeEndpoint(
+                "https://api.siliconflow.cn/v1/",
+                VlmApiProtocol.CHAT_COMPLETIONS,
+            ),
+        )
+    }
+
+    @Test
+    fun chatCompletionsParsesLedgerJsonContent() {
+        val response = JSONObject()
+            .put(
+                "choices",
+                JSONArray().put(
+                    JSONObject().put(
+                        "message",
+                        JSONObject().put("content", validLedgerPayload()),
+                    ),
+                ),
+            )
+            .toString()
+
+        val result = client.classifyChatCompletionsResponse(
+            HttpResult(code = 200, body = response),
+            requestId = "request-id",
+            configuredModel = "Qwen/Qwen3.8-27B",
+        )
+
+        assertTrue(result is VlmAnalyzeResult.Success)
+    }
+
+    @Test
+    fun captureResponseUsesScreenshotTimeAndRejectsHistoryLocally() {
+        val response = JSONObject()
+            .put("choices", JSONArray().put(JSONObject().put("message", JSONObject().put(
+                "content",
+                JSONObject()
+                    .put("schema_version", "ledger.capture.v1")
+                    .put("is_history", false)
+                    .put("amount_minor", 1280)
+                    .put("expense_target", "Cafe")
+                    .toString(),
+            )))).toString()
+        val result = client.classifyChatCompletionsResponse(
+            HttpResult(200, response), "request-id", "Qwen/Qwen3.5-35B-A3B",
+            request("Qwen/Qwen3.5-35B-A3B").copy(
+                screenshotCapturedAt = "2026-09-18T12:30:00+08:00",
+                sourcePackage = "com.tencent.mm",
+            ),
+        ) as VlmAnalyzeResult.Success
+        assertEquals(1280L, result.response.ledger.amountMinor)
+        assertEquals("2026-09-18T12:30+08:00", result.response.ledger.occurredAt.toString())
+        assertEquals(Platform.WECHAT, result.response.ledger.platform)
+    }
+
+    @Test
+    fun chatCompletionsAcceptsJsonContent() {
+        val response = JSONObject()
+            .put(
+                "choices",
+                JSONArray().put(
+                    JSONObject().put(
+                        "message",
+                        JSONObject().put("content", validLedgerPayload()),
+                    ),
+                ),
+            )
+            .toString()
+
+        val result = client.classifyChatCompletionsResponse(
+            HttpResult(code = 200, body = response),
+            requestId = "request-id",
+            configuredModel = "Qwen/Qwen3.8-27B",
+        )
+
+        assertTrue(result is VlmAnalyzeResult.Success)
+    }
+
+    @Test
+    fun chatCompletionsRejectsMultipleToolCalls() {
+        val call = JSONObject()
+            .put("type", "function")
+            .put(
+                "function",
+                JSONObject()
+                    .put("name", "submit_ledger_v1")
+                    .put("arguments", validLedgerPayload()),
+            )
+        val response = JSONObject()
+            .put(
+                "choices",
+                JSONArray().put(
+                    JSONObject().put(
+                        "message",
+                        JSONObject().put("tool_calls", JSONArray().put(call).put(call)),
+                    ),
+                ),
+            )
+            .toString()
+
+        val result = client.classifyChatCompletionsResponse(
+            HttpResult(code = 200, body = response),
+            requestId = "request-id",
+            configuredModel = "Qwen/Qwen3.8-27B",
+        ) as VlmAnalyzeResult.Failure
+
+        assertEquals("multiple_tool_calls", result.detail)
+    }
+
+    @Test
+    fun chatCompletionsRejectsSingleToolCall() {
+        val response = JSONObject()
+            .put(
+                "choices",
+                JSONArray().put(
+                    JSONObject().put(
+                        "message",
+                        JSONObject().put(
+                            "tool_calls",
+                            JSONArray().put(JSONObject().put("type", "function")),
+                        ),
+                    ),
+                ),
+            )
+            .toString()
+
+        val result = client.classifyChatCompletionsResponse(
+            HttpResult(code = 200, body = response),
+            requestId = "request-id",
+            configuredModel = "Qwen/Qwen3.8-27B",
+        ) as VlmAnalyzeResult.Failure
+
+        assertEquals("unexpected_tool_call", result.detail)
     }
 
     @Test
@@ -100,7 +369,7 @@ class OpenAiVlmClientTest {
         ) as VlmAnalyzeResult.Failure
 
         assertEquals(FailureCategory.INVALID_RESPONSE, result.category)
-        assertEquals("invalid_json", result.detail)
+        assertEquals("invalid_json_non_object", result.detail)
     }
 
     @Test
@@ -128,16 +397,32 @@ class OpenAiVlmClientTest {
     }
 
     @Test
+    fun invalidJsonDiagnosticsRevealOnlyTheStructuralShape() {
+        assertEquals("invalid_json_quoted", client.classifyInvalidJsonShape("\"not an object\""))
+        assertEquals("invalid_json_non_object", client.classifyInvalidJsonShape("not an object"))
+        assertEquals("invalid_json_truncated", client.classifyInvalidJsonShape("{\"schema_version\":"))
+        assertEquals("invalid_json_syntax", client.classifyInvalidJsonShape("{invalid}"))
+    }
+
+    @Test
     fun outerMetadataMayExceedContentLimit() {
         val body = JSONObject()
             .put("padding", "x".repeat(70 * 1024))
+            .put("status", "completed")
             .put(
-                "choices",
+                "output",
                 JSONArray().put(
-                    JSONObject().put(
-                        "message",
-                        JSONObject().put("content", validLedgerPayload()),
-                    ),
+                    JSONObject()
+                        .put("type", "message")
+                        .put("role", "assistant")
+                        .put(
+                            "content",
+                            JSONArray().put(
+                                JSONObject()
+                                    .put("type", "output_text")
+                                    .put("text", validLedgerPayload()),
+                            ),
+                        ),
                 ),
             )
             .toString()
@@ -228,114 +513,206 @@ class OpenAiVlmClientTest {
     }
 
     @Test
-    fun responseWithRefusalIsInvalidEvenWhenContentIsValid() {
-        val message = JSONObject()
-            .put("refusal", "cannot comply")
-            .put("content", validLedgerPayload())
-        val result = classifyMessage(message)
+    fun responseWithRefusalIsInvalid() {
+        val result = classifyContent(
+            JSONArray().put(
+                JSONObject()
+                    .put("type", "refusal")
+                    .put("refusal", "cannot comply"),
+            ),
+        ) as VlmAnalyzeResult.Failure
 
         assertEquals(FailureCategory.INVALID_RESPONSE, result.category)
-        assertEquals("invalid_outer_response", result.detail)
+        assertEquals("response_refusal", result.detail)
     }
 
     @Test
-    fun responseWithToolCallsIsInvalidEvenWhenContentIsValid() {
-        val message = JSONObject()
-            .put("tool_calls", JSONArray().put(JSONObject().put("id", "call-1")))
-            .put("content", validLedgerPayload())
-        val result = classifyMessage(message)
+    fun responseWithToolCallIsInvalid() {
+        val outer = JSONObject()
+            .put("status", "completed")
+            .put(
+                "output",
+                JSONArray().put(
+                    JSONObject()
+                        .put("type", "function_call")
+                        .put("name", "unexpected"),
+                ),
+            )
+            .toString()
+        val result = client.classifyAnalyzeResponse(
+            response = HttpResult(code = 200, body = outer),
+            requestId = "request-id",
+            configuredModel = "test-model",
+        ) as VlmAnalyzeResult.Failure
 
         assertEquals(FailureCategory.INVALID_RESPONSE, result.category)
-        assertEquals("invalid_outer_response", result.detail)
+        assertEquals("unexpected_tool_call", result.detail)
+    }
+
+    @Test
+    fun standardResponseRejectsReservedLedgerFunctionCall() {
+        val outer = JSONObject()
+            .put("status", "completed")
+            .put(
+                "output",
+                JSONArray().put(
+                    JSONObject()
+                        .put("type", "function_call")
+                        .put("name", "submit_ledger_v1")
+                        .put("arguments", validLedgerPayload()),
+                ),
+            )
+            .toString()
+
+        val result = client.classifyAnalyzeResponse(
+            response = HttpResult(code = 200, body = outer),
+            requestId = "request-id",
+            configuredModel = "test-model",
+        ) as VlmAnalyzeResult.Failure
+
+        assertEquals("unexpected_tool_call", result.detail)
     }
 
     @Test
     fun contentArrayRequiresStringTextParts() {
-        val message = JSONObject().put(
-            "content",
+        val result = classifyContent(
             JSONArray().put(
                 JSONObject()
-                    .put("type", "text")
+                    .put("type", "output_text")
                     .put("text", JSONObject().put("unexpected", true)),
             ),
-        )
-        val result = classifyMessage(message)
+        ) as VlmAnalyzeResult.Failure
 
         assertEquals(FailureCategory.INVALID_RESPONSE, result.category)
         assertEquals("invalid_outer_response", result.detail)
     }
 
     @Test
-    fun requestSchemaRestrictsEvidenceEnumsAndDateTime() {
-        val schema = client.ledgerSchema()
-        val properties = schema.getJSONObject("properties")
-        val occurredAt = properties.getJSONObject("occurred_at")
-            .getJSONArray("anyOf")
-            .getJSONObject(0)
-        val amount = properties.getJSONObject("amount_minor")
-            .getJSONArray("anyOf")
-            .getJSONObject(0)
-        val timeSources = properties.getJSONObject("time_source")
-            .getJSONArray("anyOf")
-            .getJSONObject(0)
-            .getJSONArray("enum")
-        val evidence = properties.getJSONObject("evidence").getJSONObject("properties")
+    fun responseTextFragmentsAreConcatenatedInOrder() {
+        val payload = validLedgerPayload()
+        val split = payload.length / 2
+        val result = classifyContent(
+            JSONArray()
+                .put(JSONObject().put("type", "output_text").put("text", payload.substring(0, split)))
+                .put(JSONObject().put("type", "output_text").put("text", payload.substring(split))),
+        )
 
-        assertEquals("date-time", occurredAt.getString("format"))
-        assertEquals(1, amount.getInt("minimum"))
-        assertEquals(3, timeSources.length())
-        assertFalse((0 until timeSources.length()).any { timeSources.getString(it) == "USER_CONFIRMED" })
-        assertFalse((0 until timeSources.length()).any { timeSources.getString(it) == "STATEMENT_VERIFIED" })
-        assertTrue(
-            evidence.getJSONObject("positive_features")
-                .getJSONObject("items")
-                .has("enum"),
-        )
-        assertTrue(
-            evidence.getJSONObject("negative_features")
-                .getJSONObject("items")
-                .has("enum"),
-        )
-        assertTrue(evidence.getJSONObject("reason_code").has("enum"))
+        assertTrue(result is VlmAnalyzeResult.Success)
     }
 
     @Test
-    fun schemaFallbackRequiresExplicitUnsupportedError() {
-        assertFalse(
-            client.explicitlyRejectsStructuredOutput(
-                "Invalid response_format: supplied schema has an error",
-            ),
+    fun responsesAcceptsInsignificantWhitespaceAroundCompleteJson() {
+        val result = client.classifyAnalyzeResponse(
+            response = openAiResponse(" \n" + validLedgerPayload() + "\n "),
+            requestId = "request-id",
+            configuredModel = "test-model",
         )
-        assertTrue(
-            client.explicitlyRejectsStructuredOutput(
-                "The response_format json_schema parameter is not supported by this model",
-            ),
-        )
+
+        assertTrue(result is VlmAnalyzeResult.Success)
     }
 
-    private fun classifyMessage(message: JSONObject): VlmAnalyzeResult.Failure {
-        val outer = JSONObject()
+    @Test
+    fun responsesStillRejectsMarkdownWrappedJson() {
+        val result = client.classifyAnalyzeResponse(
+            response = openAiResponse("\n```json\n" + validLedgerPayload() + "\n```\n"),
+            requestId = "request-id",
+            configuredModel = "test-model",
+        ) as VlmAnalyzeResult.Failure
+
+        assertEquals("response_not_strict_json", result.detail)
+    }
+
+    @Test
+    fun chatCompletionsAcceptsInsignificantWhitespaceAroundCompleteJson() {
+        val response = JSONObject()
             .put(
                 "choices",
-                JSONArray().put(JSONObject().put("message", message)),
+                JSONArray().put(
+                    JSONObject().put(
+                        "message",
+                        JSONObject().put("content", "\n" + validLedgerPayload()),
+                    ),
+                ),
+            )
+            .toString()
+
+        val result = client.classifyChatCompletionsResponse(
+            response = HttpResult(code = 200, body = response),
+            requestId = "request-id",
+            configuredModel = "test-model",
+        )
+
+        assertTrue(result is VlmAnalyzeResult.Success)
+    }
+
+    @Test
+    fun incompleteResponseIsRejected() {
+        val body = JSONObject()
+            .put("status", "incomplete")
+            .put("output", JSONArray())
+            .toString()
+        val result = client.classifyAnalyzeResponse(
+            response = HttpResult(code = 200, body = body),
+            requestId = "request-id",
+            configuredModel = "test-model",
+        ) as VlmAnalyzeResult.Failure
+
+        assertEquals("response_not_completed", result.detail)
+    }
+
+    @Test
+    fun requestSchemaOnlyAsksForHistoryAmountAndExpenseTarget() {
+        val schema = client.captureSchema()
+        val properties = schema.getJSONObject("properties")
+        val amount = properties.getJSONObject("amount_minor")
+            .getJSONArray("anyOf")
+            .getJSONObject(0)
+
+        assertEquals(setOf("schema_version", "is_history", "amount_minor", "expense_target"),
+            properties.keys().asSequence().toSet())
+        assertEquals(1, amount.getInt("minimum"))
+        assertFalse(properties.has("occurred_at"))
+        assertFalse(properties.has("platform"))
+        assertFalse(properties.has("direction"))
+    }
+
+    private fun classifyContent(content: JSONArray): VlmAnalyzeResult {
+        val outer = JSONObject()
+            .put("status", "completed")
+            .put(
+                "output",
+                JSONArray().put(
+                    JSONObject()
+                        .put("type", "message")
+                        .put("role", "assistant")
+                        .put("content", content),
+                ),
             )
             .toString()
         return client.classifyAnalyzeResponse(
             response = HttpResult(code = 200, body = outer),
             requestId = "request-id",
             configuredModel = "test-model",
-        ) as VlmAnalyzeResult.Failure
+        )
     }
 
     private fun openAiResponse(content: String): HttpResult {
         val body = JSONObject()
+            .put("status", "completed")
             .put(
-                "choices",
+                "output",
                 JSONArray().put(
-                    JSONObject().put(
-                        "message",
-                        JSONObject().put("content", content),
-                    ),
+                    JSONObject()
+                        .put("type", "message")
+                        .put("role", "assistant")
+                        .put(
+                            "content",
+                            JSONArray().put(
+                                JSONObject()
+                                    .put("type", "output_text")
+                                    .put("text", content),
+                            ),
+                        ),
                 ),
             )
             .toString()
